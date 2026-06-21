@@ -23,8 +23,8 @@ impl Network {
     }
 
     pub fn Linear(&mut self, n_input: usize, n_output: usize) -> (Tensor, Tensor) {
-        let weights = Tensor::uniform(-1., 1., vec![1, n_input, n_output], true);
-        let biases = Tensor::uniform(-1., 1., vec![1, 1, n_output], true);
+        let weights = Tensor::uniform(-1., 1., vec![n_input, n_output], true);
+        let biases = Tensor::uniform(-1., 1., vec![1, n_output], true);
         self.parametres.push(weights.tensor_data.clone());
         self.parametres.push(biases.tensor_data.clone());
 

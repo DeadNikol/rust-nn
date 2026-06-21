@@ -27,6 +27,8 @@ pub struct TensorData {
     pub data: Vec<f32>, // Само значение тензора. Оно будет плоским, обращение к строкам и тому подобное будет только через индексы. Срезов, как numpy пока не планируется
     /// Размерность тензора. Пока что она обязательно должна быть трёхмерной
     pub shape: Vec<usize>, // Размерность тензора. Она должна быть строго трёхмерной
+    /// Смещения для того, что бы можно было избежать строгой трёхмерности и быстро получать доступ к элементу по индексам
+    pub stride: Vec<usize>,
     /// Флаг для обозначения необходимости взятия производной и построения графа вычислений дальше
     pub require_grad: bool, // Флаг необходимости взятия производной. Если true, то в память записываем все операции над этим тензором. Потом проходим в обратном порядке, и если этот тензор непосредственно участвовал в операции, то прибавляем его к значению градиента
     /// Список родителей, породивших этот тензор. В зависимости от операции, их может быть сколько угодно
@@ -38,6 +40,36 @@ pub struct TensorData {
 }
 
 impl TensorData {
+    pub fn new(
+        data: Vec<f32>,
+        shape: Vec<usize>,
+        require_grad: bool,
+        parents: Vec<Rc<RefCell<TensorData>>>,
+        operation: Option<Operation>,
+    ) -> Self {
+        assert_eq!(
+            shape.iter().product::<usize>(),
+            data.len(),
+            "Невозможно конвертировать массив длины {} в тензор размерности {:?} (Ожидается массив длины {})",
+            data.len(),
+            shape,
+            shape.iter().product::<usize>()
+        );
+        let mut stride: Vec<usize> = vec![1; shape.len()];
+        for i in (0..shape.len() - 1).rev() {
+            stride[i] = stride[i + 1] * shape[i + 1];
+        }
+        Self {
+            data,
+            shape,
+            stride,
+            require_grad,
+            parents,
+            grad: vec![],
+            operation: operation,
+        }
+    }
+
     pub fn zero_grad(&mut self) {
         for g in &mut self.grad {
             *g = 0.0
@@ -45,28 +77,27 @@ impl TensorData {
     }
     /// Векторное умножение данных двух тензоров
     pub fn matmul(&self, right_tensor: &TensorData) -> Vec<f32> {
-        let batch_shape_flag = self.shape[0] == 1 && right_tensor.shape[0] == 1; // Если это не плоские матрицы
-        assert_eq!(
-            batch_shape_flag, true,
-            "Матрично можно перемножать только матрицы (shape[0] == 1). Дан тензор"
+        assert!(
+            self.shape.len() == 2 && right_tensor.shape.len() == 2,
+            "Матричное перемножение доступно только для матриц (Всего 2 размерности), даны {}-мерный и {}-мерный тензоры.",
+            self.shape.len(),
+            right_tensor.shape.len()
         );
 
-        let shape_flag: bool = // флаг совпадения размерностей
-                self.shape[2] == right_tensor.shape[1];
+        let self_rows = self.shape[self.shape.len() - 2];
+        let self_cols = self.shape[self.shape.len() - 1];
+        let right_rows = right_tensor.shape[right_tensor.shape.len() - 2];
+        let right_cols = right_tensor.shape[right_tensor.shape.len() - 1];
+
         assert_eq!(
-            // Если размерности не сошлись по принципу [x,n] @ [n,y] => [x,y], то кидаем ошибку
-            shape_flag,
-            true,
+            self_cols, right_rows,
             "Что бы векторно перемножить две матрицы, их размерности должны быть [x,n] @ [n,y] => [x,y]. Даны [{},{}] @ [{},{}] => ошибка",
-            self.shape[1],
-            self.shape[2],
-            right_tensor.shape[1],
-            right_tensor.shape[2]
+            self_rows, self_cols, right_rows, right_cols
         );
 
-        let m = self.shape[1];
-        let k = self.shape[2];
-        let n = right_tensor.shape[2];
+        let m = self_rows;
+        let k = self_cols;
+        let n = right_cols;
 
         let a = &self.data;
         let b = &right_tensor.data;
@@ -88,62 +119,94 @@ impl TensorData {
             .collect();
         output_data
     }
-    /// Суммирует данные двух тензоров. Поддерживает две размерности: такую же, как у родителя и построчное добавление (shape = vec![1, 1, m])
+
     pub fn add(&self, right_tensor: &TensorData) -> Vec<f32> {
-        assert_eq!(self.shape[0], 1);
-        assert_eq!(right_tensor.shape[0], 1);
+        // Блок проверок
         assert_eq!(
-            self.shape[2], right_tensor.shape[2],
-            "Число столбцов должно совпадать"
+            self.shape.len(),
+            right_tensor.shape.len(),
+            "Количество размерностей должно совпадать: {:?} vs {:?}",
+            self.shape,
+            right_tensor.shape
         );
 
-        let rows_self = self.shape[1];
-        let rows_right = right_tensor.shape[1];
-        let cols = self.shape[2];
-        let a = &self.data;
-        let b = &right_tensor.data;
+        let mut difference: bool = false;
+        let mut ability_to_add_right_to_left_flag: bool = true;
+        let mut different_batch_index: usize = 0;
+        // Проверка: если размерности совпадают или если не совпадает только одна размерность, а все большие == единице
+        for i in (0..self.shape.len()).rev() {
+            let dim_self = self.shape[i];
+            let dim_right = right_tensor.shape[i];
 
-        if rows_self == rows_right {
-            // Одинаковая высота – поэлементное сложение (возможно, одинаковые формы)
-            assert_eq!(self.shape, right_tensor.shape);
-            let mut new_data = vec![0.0; a.len()];
+            if dim_self == dim_right && !difference {
+                continue;
+            } else if dim_self != dim_right && dim_self > dim_right && !difference {
+                difference = true;
+                different_batch_index = i; // Запоминаем индекс различающегося батча
+            } else if dim_self == 1 && dim_right == 1 && difference {
+                continue;
+            } else {
+                ability_to_add_right_to_left_flag = false;
+            }
+        }
+        assert!(
+            ability_to_add_right_to_left_flag,
+            "Нельзя слогать тензоры размерностей {:?} и {:?}. Отличаться должен только одна размерность, а все значения слева от неё должны быть равными единице",
+            self.shape, right_tensor.shape
+        );
+
+        let temp_data = self.data.clone();
+
+        if !difference {
+            let temp_right_data = right_tensor.data.clone(); // Временный держатель данных правого операнда различается при бродкасте
+
+            // Случай 1: одинаковые формы → поэлементное сложение
+            let mut new_data = vec![0.0; self.data.len()];
             new_data.par_iter_mut().enumerate().for_each(|(i, v)| {
-                *v = a[i] + b[i];
+                *v = temp_data[i] + temp_right_data[i];
             });
             new_data
-        } else if rows_self == 1 && rows_right > 1 {
-            // self – строка (bias), right – матрица
-            let bias = a;
-            let mut new_data = vec![0.0; b.len()];
-            new_data
-                .par_chunks_mut(cols)
-                .enumerate()
-                .for_each(|(row_idx, row)| {
-                    let base = row_idx * cols;
-                    for c in 0..cols {
-                        row[c] = bias[c] + b[base + c];
-                    }
-                });
-            new_data
-        } else if rows_right == 1 && rows_self > 1 {
-            // right – строка (bias), self – матрица
-            let bias = b;
-            let mut new_data = vec![0.0; a.len()];
-            new_data
-                .par_chunks_mut(cols)
-                .enumerate()
-                .for_each(|(row_idx, row)| {
-                    let base = row_idx * cols;
-                    for c in 0..cols {
-                        row[c] = a[base + c] + bias[c];
-                    }
-                });
-            new_data
         } else {
-            panic!(
-                "Неподдерживаемые формы для сложения: self.shape={:?}, right.shape={:?}",
-                self.shape, right_tensor.shape
-            );
+            let temp_right_data = right_tensor
+                .data
+                .clone()
+                .repeat(self.shape[different_batch_index]);
+
+            let mut new_data = vec![0.0; self.data.len()];
+            new_data.par_iter_mut().enumerate().for_each(|(i, v)| {
+                *v = temp_data[i] + temp_right_data[i];
+            });
+
+            new_data
+
+            // Случай 2: различается batch → broadcasting
+
+            // let batch_self = self.shape[0];
+            // let batch_right = right_tensor.shape[0];
+            // let elements_per_batch: usize = self.shape[1..].iter().product();
+
+            // let output_batch = batch_self.max(batch_right);
+            // let mut new_data = vec![0.0; output_batch * elements_per_batch];
+
+            // new_data
+            //     .par_chunks_mut(elements_per_batch)
+            //     .enumerate()
+            //     .for_each(|(batch, chunk)| {
+            //         for i in 0..elements_per_batch {
+            //             let a_val = if batch_self == 1 {
+            //                 temp_data[i]
+            //             } else {
+            //                 temp_data[batch * elements_per_batch + i]
+            //             };
+            //             let b_val = if batch_right == 1 {
+            //                 temp_right_data[i]
+            //             } else {
+            //                 temp_right_data[batch * elements_per_batch + i]
+            //             };
+            //             chunk[i] = a_val + b_val;
+            //         }
+            //     });
+            // new_data
         }
     }
     /// Функция активации ReLu
@@ -155,8 +218,14 @@ impl TensorData {
     }
     /// Возвращает транспонировнное значение тензора
     pub fn transpose(&self) -> TensorData {
-        let m = self.shape[1];
-        let n = self.shape[2];
+        assert_eq!(
+            self.shape.len(),
+            2,
+            "Только матрицы поддаются транспонированию. Дан {}-мерный тензор.",
+            self.shape.len()
+        );
+        let m = self.shape[0];
+        let n = self.shape[1];
         let data = &self.data;
 
         let mut new_data = vec![0.0; m * n];
@@ -166,15 +235,7 @@ impl TensorData {
                 row[i] = data[i * n + j];
             }
         });
-
-        TensorData {
-            data: new_data,
-            shape: vec![self.shape[0], n, m],
-            require_grad: self.require_grad,
-            parents: vec![],
-            grad: vec![],
-            operation: None,
-        }
+        TensorData::new(new_data, vec![n, m], self.require_grad, vec![], None)
     }
 
     pub fn sigmoid(&self) -> Vec<f32> {
@@ -192,7 +253,13 @@ impl TensorData {
     }
 
     pub fn softmax(&self) -> Vec<f32> {
-        let cols = self.shape[2];
+        assert_eq!(
+            self.shape.len(),
+            2,
+            "softmax работает только для двумерных матриц. Дан {}-мерный тензор.",
+            self.shape.len()
+        );
+        let cols = self.shape[1];
         let data = &self.data;
         let mut output = vec![0.0; self.data.len()];
 
@@ -228,12 +295,17 @@ impl TensorData {
 
     pub fn cross_entropy_with_softmax(&self, targets: &TensorData) -> (Vec<f32>, f32) {
         assert_eq!(
+            self.shape.len(),
+            2,
+            "Кросс-энтропия работает только для двумерных матриц. Дан недвумерный тензор"
+        );
+        assert_eq!(
             self.shape, targets.shape,
             "Формы предсказаний и целей должны совпадать"
         );
 
-        let rows = self.shape[1];
-        let cols = self.shape[2];
+        let rows = self.shape[0];
+        let cols = self.shape[1];
 
         let softmax_output = self.softmax();
 
@@ -259,17 +331,9 @@ impl TensorData {
 
         (softmax_output, loss_value)
     }
-
     /// Возвращает объект, `data` в котором равна оригинальному `grad`
     pub fn grad(&self) -> TensorData {
-        TensorData {
-            data: self.grad.clone(),
-            shape: self.shape.clone(),
-            require_grad: false, // Возможно здесь не стоит хардкодить
-            parents: vec![],
-            grad: vec![],
-            operation: None,
-        }
+        TensorData::new(self.grad.clone(), self.shape.clone(), false, vec![], None)
     }
 
     pub fn mse(&self, right_tensor: &TensorData) -> f32 {
@@ -293,7 +357,6 @@ impl TensorData {
 
         let sum: f32 = squared_diff.par_iter().sum();
         let mse_value = sum / n;
-
         mse_value
     }
 }
@@ -312,13 +375,6 @@ impl Tensor {
         parents: Vec<Rc<RefCell<TensorData>>>,
         operation: Option<Operation>,
     ) -> Tensor {
-        assert_eq!(
-            shape.len(),
-            3,
-            "Тензор обязан иметь 3 размерности, получено: {}",
-            shape.len()
-        );
-
         let size = shape.iter().product();
         assert_eq!(
             data.len(),
@@ -327,14 +383,7 @@ impl Tensor {
             data.len(),
             shape
         );
-        let tensor_data = TensorData {
-            data,
-            shape,
-            require_grad,
-            parents,
-            grad: Vec::new(),
-            operation,
-        };
+        let tensor_data = TensorData::new(data, shape, require_grad, parents, operation);
         Tensor {
             tensor_data: Rc::new(RefCell::new(tensor_data)),
         }
@@ -345,37 +394,6 @@ impl Tensor {
         let mut rng = rand::rng();
         let data: Vec<f32> = (0..len).map(|_| rng.random_range(low..high)).collect();
         return Self::new(data, shape, require_grad, Vec::new(), None);
-    }
-
-    /// Позволяет получить значение по определённому индексу
-    pub fn get(&self, batch: usize, row: usize, column: usize) -> f32 {
-        //Раньше функция возвращала ссылку на число
-
-        // Блок ниже можно удалять к хуям
-
-        let selff = self.tensor_data.borrow();
-        let batch_len = selff.data.len() / selff.shape[0]; // Количество элементов в одном батче
-        let row_len = batch_len / selff.shape[1]; // Количество строк внутри батча
-        let lambda_b = batch * batch_len; // Сдвиг по батчу
-        let lambda_r = row * row_len; // Свдиг по строке
-        let index = lambda_b + lambda_r + column;
-        let output = selff.data.get(index).cloned();
-
-        // let batch_len = self.data.len() / self.shape[0]; // Количество элементов в одном батче
-        // let row_len = batch_len / self.shape[1]; // Количество строк внутри батча
-        // let lambda_b = batch * batch_len; // Сдвиг по батчу
-        // let lambda_r = row * row_len; // Свдиг по строке
-        // let index = lambda_b + lambda_r + column;
-        // let output = self.data.get(index);
-        match output {
-            Some(value) => return value,
-            None => {
-                panic!(
-                    "Не сущиествует элемента с индексом {}, {}, {}. Номер элемента: {}",
-                    batch, row, column, index
-                );
-            }
-        }
     }
     /// Обнуляет градиент, что бы он не накапливался после `backward()`
     #[allow(dead_code)]
@@ -390,15 +408,24 @@ impl Tensor {
             .tensor_data
             .borrow()
             .matmul(&right_tensor.tensor_data.borrow());
+        let require_grad = {
+            if self.tensor_data.borrow().require_grad
+                || right_tensor.tensor_data.borrow().require_grad
+            {
+                true
+            } else {
+                false
+            }
+        };
 
         Tensor::new(
             output_data,
             vec![
-                1,
-                self.tensor_data.borrow().shape[1],
-                right_tensor.tensor_data.borrow().shape[2],
+                //Пока что жёстко хардкодим количество размерностей
+                self.tensor_data.borrow().shape[0],
+                right_tensor.tensor_data.borrow().shape[1],
             ],
-            false,
+            require_grad,
             vec![self.tensor_data.clone(), right_tensor.tensor_data.clone()],
             Some(Operation::Matmul),
         )
@@ -406,10 +433,11 @@ impl Tensor {
     /// Функция активации ReLu
     pub fn relu(&self) -> Tensor {
         let output_data = self.tensor_data.borrow().relu();
+
         Tensor::new(
             output_data,
             self.tensor_data.borrow().shape.clone(),
-            false,
+            self.tensor_data.borrow().require_grad,
             vec![self.tensor_data.clone()],
             Some(Operation::ReLu),
         )
@@ -417,10 +445,17 @@ impl Tensor {
 
     pub fn sigmoid(&self) -> Tensor {
         let output = self.tensor_data.borrow().sigmoid();
+        let require_grad = {
+            if self.tensor_data.borrow().require_grad {
+                true
+            } else {
+                false
+            }
+        };
         Tensor::new(
             output,
             self.tensor_data.borrow().shape.clone(),
-            true,
+            self.tensor_data.borrow().require_grad,
             vec![self.tensor_data.clone()],
             Some(Operation::Sigmoid),
         )
@@ -444,10 +479,19 @@ impl Tensor {
             .cross_entropy_with_softmax(&target.tensor_data.borrow());
         let parent0 = self.tensor_data.clone();
         parent0.borrow_mut().data = softmax_output;
+        
+        let require_grad = {
+            if self.tensor_data.borrow().require_grad {
+                true
+            } else {
+                false
+            }
+        };
+
         Tensor::new(
             vec![loss],
-            vec![1, 1, 1],
-            true,
+            vec![1, 1],
+            require_grad,
             vec![parent0, target.tensor_data.clone()],
             Some(Operation::CrossEntropyWithSoftmax),
         )
@@ -455,30 +499,32 @@ impl Tensor {
     /// Возвращает транспонированное значение тензора
     #[allow(dead_code)]
     pub fn transpose(&self) -> Tensor {
-        let m = self.tensor_data.borrow().shape[1];
-        let n = self.tensor_data.borrow().shape[2];
+        let m = self.tensor_data.borrow().shape[0];
+        let n = self.tensor_data.borrow().shape[1];
         let new_data = self.tensor_data.borrow().transpose();
 
-        Tensor::new(new_data.data, vec![1, n, m], false, vec![], None)
+        Tensor::new(new_data.data, vec![n, m], false, vec![], None)
     }
     /// Суммирует данные двух тензоров. Поддерживает две размерности: такую же, как у родителя и построчное добавление (shape = vec![1, 1, m])
     #[allow(dead_code)]
     pub fn add(&self, right_tensor: &Tensor) -> Tensor {
-        let m = std::cmp::max(
-            self.tensor_data.borrow().shape[1],
-            right_tensor.tensor_data.borrow().shape[1],
-        );
-        let n = self.tensor_data.borrow().shape[2];
-
         let new_data = self
             .tensor_data
             .borrow()
             .add(&right_tensor.tensor_data.borrow());
 
+        let require_grad = {
+            if self.tensor_data.borrow().require_grad {
+                true
+            } else {
+                false
+            }
+        };
+
         Tensor::new(
             new_data,
-            vec![1, m, n],
-            false,
+            self.tensor_data.borrow().shape.clone(),
+            require_grad,
             vec![self.tensor_data.clone(), right_tensor.tensor_data.clone()],
             Some(Operation::Add),
         )
@@ -486,10 +532,19 @@ impl Tensor {
     /// Средняя квадратичная ошибка
     pub fn mse(&self, y_true: &Tensor) -> Tensor {
         let output = self.tensor_data.borrow().mse(&y_true.tensor_data.borrow());
+        
+        let require_grad = {
+            if self.tensor_data.borrow().require_grad {
+                true
+            } else {
+                false
+            }
+        };
+
         Tensor::new(
             vec![output],
-            vec![1, 1, 1],
-            false,
+            vec![1],
+            require_grad,
             vec![self.tensor_data.clone(), y_true.tensor_data.clone()],
             Some(Operation::MSE),
         )
@@ -512,7 +567,7 @@ impl Tensor {
             tensor_data: Rc::new(RefCell::new(grad_tensor_data)),
         }
     }
-    /// Функция взятия производной. Строит граф вычислений, берёт производные по каждому изначальному тензору.
+
     fn add_grad(parent: Rc<RefCell<TensorData>>, new_grad: Vec<f32>) {
         let mut pipa = parent.borrow_mut();
         if pipa.grad.is_empty() {
@@ -523,6 +578,7 @@ impl Tensor {
             }
         }
     }
+    /// Функция взятия производной. Строит граф вычислений, берёт производные по каждому изначальному тензору.
     pub fn backward(&self) {
         let start_node = self.tensor_data.clone();
         let basic_grad = vec![1.; start_node.borrow().shape.iter().product()];
@@ -530,15 +586,18 @@ impl Tensor {
         let graph = graph::Graph::new(start_node).build_topo();
 
         for i in graph.iter().rev() {
+            // println!("{:?}", i.borrow().operation);
+            if !i.borrow().require_grad {
+                continue;
+            }
             let current_node = i.borrow();
-            let current_node_grad = TensorData {
-                data: current_node.grad.clone(),
-                shape: current_node.shape.clone(),
-                require_grad: false,
-                parents: vec![],
-                grad: vec![],
-                operation: None,
-            };
+            let current_node_grad = TensorData::new(
+                current_node.grad.clone(),
+                current_node.shape.clone(),
+                false,
+                vec![],
+                None,
+            );
 
             match current_node.operation {
                 Some(Operation::Matmul) => {
@@ -553,33 +612,25 @@ impl Tensor {
                     Self::add_grad(current_node.parents[1].clone(), grad_right);
                 }
                 Some(Operation::Add) => {
-                    let grad = current_node_grad.data.clone();
-                    let rows_self = current_node.parents[0].borrow().shape[1];
-                    let rows_right = current_node.parents[1].borrow().shape[1];
-                    let cols = current_node.shape[2];
+                    let right_shape = current_node.parents[1].borrow().shape.clone();
 
-                    if rows_self == 1 && rows_right > 1 {
-                        let mut summed_grad = vec![0.0; cols];
-                        for chunk in grad.chunks(cols) {
-                            for (s, &g) in summed_grad.iter_mut().zip(chunk.iter()) {
-                                *s += g;
-                            }
+                    // Градиент для левого (большого) — без изменений
+                    Self::add_grad(
+                        current_node.parents[0].clone(),
+                        current_node_grad.data.clone(),
+                    );
+
+                    // Градиент для правого (маленького) — суммируем по батчам
+                    let elements_per_batch: usize = right_shape.iter().product();
+                    let mut grad_right = vec![0.0; elements_per_batch];
+
+                    for chunk in current_node_grad.data.chunks(elements_per_batch) {
+                        for (i, &g) in chunk.iter().enumerate() {
+                            grad_right[i] += g;
                         }
-                        Self::add_grad(current_node.parents[0].clone(), summed_grad);
-                        Self::add_grad(current_node.parents[1].clone(), grad);
-                    } else if rows_right == 1 && rows_self > 1 {
-                        let mut summed_grad = vec![0.0; cols];
-                        for chunk in grad.chunks(cols) {
-                            for (s, &g) in summed_grad.iter_mut().zip(chunk.iter()) {
-                                *s += g;
-                            }
-                        }
-                        Self::add_grad(current_node.parents[0].clone(), grad);
-                        Self::add_grad(current_node.parents[1].clone(), summed_grad);
-                    } else {
-                        Self::add_grad(current_node.parents[0].clone(), grad.clone());
-                        Self::add_grad(current_node.parents[1].clone(), grad);
                     }
+
+                    Self::add_grad(current_node.parents[1].clone(), grad_right);
                 }
                 Some(Operation::ReLu) => {
                     let grad = current_node
@@ -643,213 +694,66 @@ impl Tensor {
             }
         }
     }
-    // pub fn backward(&self) {
-    //     let start_node = self.tensor_data.clone(); // Клонируем данные текущего тензора
-    //     let basic_grad = vec![1.; start_node.borrow().shape.iter().product()]; // Создаём градииент по умолчанию
-    //     start_node.borrow_mut().grad = basic_grad; // Устанавливаем градиент по умолчанию
-    //     let graph = graph::Graph::new(start_node); // Инициализируем граф
-    //     let graph = graph.build_topo(); // Собираем граф вычислений
-
-    //     for i in graph.iter().rev() {
-    //         // Проходим по графу в обратном порядке
-    //         let current_node = i.borrow(); // получаем доступ к данным
-    //         let current_node_grad = TensorData {
-    //             // Создаём новый объект, где data = grad, потому что для Vec<f32> нет прописанного matmul
-    //             data: current_node.grad.clone(),
-    //             shape: current_node.shape.clone(),
-    //             require_grad: false,
-    //             parents: vec![],
-    //             grad: vec![],
-    //             operation: None,
-    //         };
-    //         match current_node.operation {
-    //             // В зависимости от операции, создавшей этот тензор, вычисляем производную
-    //             Some(Operation::Matmul) => {
-    //                 current_node.parents[0].borrow_mut().grad =
-    //                     current_node_grad.matmul(&current_node.parents[1].borrow().transpose());
-
-    //                 current_node.parents[1].borrow_mut().grad = current_node.parents[0]
-    //                     .borrow_mut()
-    //                     .transpose()
-    //                     .matmul(&current_node_grad);
-    //             }
-    //             Some(Operation::Add) => {
-    //                 let grad = current_node_grad.data.clone();
-    //                 let rows_self = current_node.parents[0].borrow().shape[1];
-    //                 let rows_right = current_node.parents[1].borrow().shape[1];
-    //                 let cols = current_node.shape[2];
-
-    //                 // Левый родитель — bias (1 строка), правый — матрица
-    //                 if rows_self == 1 && rows_right > 1 {
-    //                     // Суммируем градиент по строкам для bias
-    //                     let mut summed_grad = vec![0.0; cols];
-    //                     for chunk in grad.chunks(cols) {
-    //                         for (s, &g) in summed_grad.iter_mut().zip(chunk.iter()) {
-    //                             *s += g;
-    //                         }
-    //                     }
-    //                     current_node.parents[0].borrow_mut().grad = summed_grad;
-    //                     current_node.parents[1].borrow_mut().grad = grad;
-    //                 }
-    //                 // Правый родитель — bias, левый — матрица
-    //                 else if rows_right == 1 && rows_self > 1 {
-    //                     let mut summed_grad = vec![0.0; cols];
-    //                     for chunk in grad.chunks(cols) {
-    //                         for (s, &g) in summed_grad.iter_mut().zip(chunk.iter()) {
-    //                             *s += g;
-    //                         }
-    //                     }
-    //                     current_node.parents[0].borrow_mut().grad = grad;
-    //                     current_node.parents[1].borrow_mut().grad = summed_grad;
-    //                 }
-    //                 // Обычное сложение одинаковых форм
-    //                 else {
-    //                     current_node.parents[0].borrow_mut().grad = grad.clone();
-    //                     current_node.parents[1].borrow_mut().grad = grad;
-    //                 }
-    //             }
-    //             Some(Operation::ReLu) => {
-    //                 current_node.parents[0].borrow_mut().grad = current_node
-    //                     .data
-    //                     .par_iter()
-    //                     .zip(current_node_grad.data.par_iter())
-    //                     .map(|(&data, &grad)| if data > 0.0 { grad } else { 0.0 })
-    //                     .collect();
-    //             }
-    //             Some(Operation::Sigmoid) => {
-    //                 let sigmoid_output = &current_node.data; // σ(x)
-    //                 let grad_output = &current_node_grad.data; // grad от вышестоящих узлов
-    //                 // println!("sigmoid: {:?}", sigmoid_output);
-    //                 // println!("grad_sigmoid: {:?}", grad_output);
-    //                 // Производная сигмоида: σ'(x) = σ(x) * (1 - σ(x))
-    //                 // grad_input = grad_output * σ'(x)
-    //                 let grad_input: Vec<f32> = sigmoid_output
-    //                     .par_iter()
-    //                     .zip(grad_output.par_iter())
-    //                     .map(|(&data_value, &grad_value)| {
-    //                         let derivative = data_value * (1. - data_value);
-    //                         let result = grad_value * derivative;
-    //                         result
-    //                     })
-    //                     .collect();
-
-    //                 current_node.parents[0].borrow_mut().grad = grad_input;
-    //             }
-    //             Some(Operation::Tanh) => {
-    //                 let output: Vec<f32> = current_node
-    //                     .data
-    //                     .par_iter()
-    //                     .zip(current_node_grad.data.par_iter())
-    //                     .map(|(&data_value, &grad_value)| {
-    //                         (1. - data_value * data_value) * grad_value
-    //                     })
-    //                     .collect();
-    //                 current_node.parents[0].borrow_mut().grad = output;
-    //             }
-    //             Some(Operation::MSE) => {
-    //                 let grad = {
-    //                     let y_pred = current_node.parents[0].borrow();
-    //                     let y_true = current_node.parents[1].borrow();
-    //                     let n = y_pred.data.len() as f32;
-    //                     let grad_output = &current_node_grad.data[0];
-
-    //                     y_pred
-    //                         .data
-    //                         .par_iter()
-    //                         .zip(y_true.data.par_iter())
-    //                         .map(|(&pred_data, &true_data)| {
-    //                             2.0 * (pred_data - true_data) * grad_output / n
-    //                         })
-    //                         .collect::<Vec<f32>>()
-    //                 };
-    //                 current_node.parents[0].borrow_mut().grad = grad;
-    //             }
-    //             Some(Operation::CrossEntropyWithSoftmax) => {
-    //                 let grad: Vec<f32> = {
-    //                     let y_pred = current_node.parents[0].borrow();
-    //                     let y_true = current_node.parents[1].borrow();
-    //                     let n = y_pred.shape[1] as f32;
-    //                     let grad: Vec<f32> = y_pred
-    //                         .data
-    //                         .iter()
-    //                         .zip(y_true.data.iter())
-    //                         .map(|(&pred_value, &true_value)| (pred_value - true_value) / n)
-    //                         .collect();
-    //                     grad
-    //                 };
-    //                 current_node.parents[0].borrow_mut().grad = grad;
-    //             }
-    //             None => {
-    //                 // println!("Это конечное значение");
-    //             }
-    //         }
-    //     }
-    // }
 }
 
 impl fmt::Display for Tensor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let selff = self.tensor_data.borrow();
+        let data = self.tensor_data.borrow();
+        let shape = &data.shape;
 
-        writeln!(
-            f,
-            "Tensor [{} x {} x {}]:",
-            selff.shape[0], selff.shape[1], selff.shape[2]
-        )?;
+        if data.data.is_empty() {
+            return write!(f, "Tensor {:?}: []", shape);
+        }
 
-        for b in 0..selff.shape[0] {
-            if selff.shape[0] > 1 {
-                writeln!(f, "Batch {}:", b)?;
+        write!(f, "Tensor {:?}: ", shape)?;
+
+        // Внутренняя рекурсивная функция
+        fn fmt_recursive(
+            f: &mut fmt::Formatter<'_>,
+            data: &[f32],
+            shape: &[usize],
+            offset: usize,
+            depth: usize,
+        ) -> fmt::Result {
+            if shape.is_empty() {
+                return write!(f, "{:.4}", data[offset]);
             }
-            writeln!(f, "[")?;
-            for r in 0..selff.shape[1] {
-                write!(f, " [")?;
-                for c in 0..selff.shape[2] {
-                    let val = self.get(b, r, c);
-                    if c > 0 {
+
+            if shape.len() == 1 {
+                write!(f, "[")?;
+                for i in 0..shape[0] {
+                    if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{:.4}", val)?;
+                    write!(f, "{:.4}", data[offset + i])?;
                 }
-                if r == selff.shape[1] - 1 {
-                    writeln!(f, "]")?;
-                } else {
-                    writeln!(f, "],")?;
-                }
+                return write!(f, "]");
             }
-            writeln!(f, "]")?;
+
+            let dim = shape[0];
+            let rest = &shape[1..];
+            let step: usize = rest.iter().product();
+
+            write!(f, "[\n")?;
+
+            for i in 0..dim {
+                for _ in 0..depth + 1 {
+                    write!(f, " ")?;
+                }
+                fmt_recursive(f, data, rest, offset + i * step, depth + 1)?;
+                if i < dim - 1 {
+                    write!(f, ",")?;
+                }
+                writeln!(f)?;
+            }
+
+            for _ in 0..depth {
+                write!(f, " ")?;
+            }
+            write!(f, "]")
         }
-        Ok(())
 
-        // writeln!(
-        //     f,
-        //     "Tensor [{} x {} x {}]:",
-        //     self.shape[0], self.shape[1], self.shape[2]
-        // )?;
-
-        // for b in 0..self.shape[0] {
-        //     if self.shape[0] > 1 {
-        //         writeln!(f, "Batch {}:", b)?;
-        //     }
-        //     writeln!(f, "[")?;
-        //     for r in 0..self.shape[1] {
-        //         write!(f, " [")?;
-        //         for c in 0..self.shape[2] {
-        //             let val = self.get(b, r, c);
-        //             if c > 0 {
-        //                 write!(f, ", ")?;
-        //             }
-        //             write!(f, "{:.4}", val)?;
-        //         }
-        //         if r == self.shape[1] - 1 {
-        //             writeln!(f, "]")?;
-        //         } else {
-        //             writeln!(f, "],")?;
-        //         }
-        //     }
-        //     writeln!(f, "]")?;
-        // }
-        // Ok(())
+        fmt_recursive(f, &data.data, shape, 0, 0)
     }
 }
 

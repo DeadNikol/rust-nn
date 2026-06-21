@@ -1,12 +1,9 @@
 mod tensor;
-use core::time;
-use std::thread::park_timeout;
-use std::time::Instant;
+use std::io::ErrorKind::OutOfMemory;
 
-use itertools::{enumerate, iproduct};
 use tensor::*;
 
-use crate::batch_iterator::BatchIterator;
+use crate::network::Network;
 
 mod batch_iterator;
 mod graph;
@@ -16,6 +13,8 @@ mod optims;
 
 #[cfg(test)]
 mod unit_tests;
+
+// Я для matmul жестоко нахардкодил размерность 2, однако в этом же matmul я писал, что размерность может быть любой, лишь бы пер
 
 fn main() {
     fn test_iris() {
@@ -67,15 +66,15 @@ fn main() {
 
             let num_samples = x_data.len() / 4;
 
-            let x = Tensor::new(x_data, vec![1, num_samples, 4], false, vec![], None);
-            let y = Tensor::new(y_data, vec![1, num_samples, 3], false, vec![], None);
+            let x = Tensor::new(x_data, vec![num_samples, 4], false, vec![], None);
+            let y = Tensor::new(y_data, vec![num_samples, 3], false, vec![], None);
 
             (x, y)
         }
 
         fn calculate_accuracy(predictions: &Tensor, targets: &Tensor) -> f32 {
-            let batch_size = predictions.tensor_data.borrow().shape[1];
-            let num_classes = predictions.tensor_data.borrow().shape[2];
+            let batch_size = predictions.tensor_data.borrow().shape[0];
+            let num_classes = predictions.tensor_data.borrow().shape[1];
 
             let pred_data = predictions.tensor_data.borrow();
             let target_data = targets.tensor_data.borrow();
@@ -123,12 +122,12 @@ fn main() {
 
         net.fit(
             5000,
-            0.005,
+            0.0001,
             x.clone(),
             y.clone(),
             network::Loss::CrossEntropyWithSoftmax,
-            15,
-            100,
+            150,
+            1000,
             forward_fn,
         );
         let output = net.forward(&x, forward_fn)._softmax();
@@ -137,7 +136,4 @@ fn main() {
         println!("accuracy: {}", acc);
     }
     test_iris();
-
-    // Без накопления: w.grad = 3 (только от последнего)
-    // С накоплением: w.grad = 2*w + 2 = 2 + 2 = 4 (сумма градиентов от обеих операций)
 }

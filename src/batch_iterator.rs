@@ -20,7 +20,7 @@ impl BatchIterator {
         targets: Rc<RefCell<TensorData>>,
         batch_size: usize,
     ) -> Self {
-        let num_samples = x_data.borrow().shape[1];
+        let num_samples = x_data.borrow().shape[0];
         let indices: Vec<usize> = (0..num_samples).collect();
 
         Self {
@@ -39,7 +39,7 @@ impl BatchIterator {
     }
 
     pub fn num_batches(&self) -> usize {
-        let num_samples = self.x_data.borrow().shape[1];
+        let num_samples = self.x_data.borrow().shape[0];
         (num_samples + self.batch_size - 1) / self.batch_size
     }
 }
@@ -48,9 +48,9 @@ impl Iterator for BatchIterator {
     type Item = (Tensor, Tensor);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let num_samples = self.x_data.borrow().shape[1];
-        let x_data_cols = self.x_data.borrow().shape[2];
-        let target_data_cols = self.targets.borrow().shape[2];
+        let num_samples = self.x_data.borrow().shape[0];
+        let x_data_cols = self.x_data.borrow().shape[1];
+        let target_data_cols = self.targets.borrow().shape[1];
 
         if self.current >= num_samples {
             return None;
@@ -79,7 +79,7 @@ impl Iterator for BatchIterator {
 
         let x_batch = Tensor::new(
             batch_x,
-            vec![1, batch_len, x_data_cols],
+            vec![batch_len, x_data_cols],
             false,
             vec![],
             None,
@@ -87,7 +87,7 @@ impl Iterator for BatchIterator {
 
         let y_batch = Tensor::new(
             batch_y,
-            vec![1, batch_len, target_data_cols],
+            vec![batch_len, target_data_cols],
             false,
             vec![],
             None,
