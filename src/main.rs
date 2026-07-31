@@ -1,6 +1,10 @@
 mod tensor;
-use std::io::ErrorKind::OutOfMemory;
 
+use core::panic;
+use std::{cell::RefCell, rc::Rc};
+
+use itertools::{Itertools, Position::Last, iproduct};
+use rayon::vec;
 use tensor::*;
 
 use crate::network::Network;
@@ -14,126 +18,168 @@ mod optims;
 #[cfg(test)]
 mod unit_tests;
 
-// Я для matmul жестоко нахардкодил размерность 2, однако в этом же matmul я писал, что размерность может быть любой, лишь бы пер
-
 fn main() {
-    fn test_iris() {
-        use std::fs::File;
-        use std::io::{BufRead, BufReader};
-        fn load_iris_data(file_path: &str) -> (Tensor, Tensor) {
-            let file = File::open(file_path).expect("Файл не найден");
-            let reader = BufReader::new(file);
+    let layer = tensor::Tensor::new(
+        (0..3 * 3).map(|f| f as f32).collect(),
+        vec![1, 1, 3, 3],
+        false,
+        vec![],
+        None,
+    );
+    let kernel = Tensor::new(
+        (0..2 * 2).map(|f| f as f32).collect(),
+        vec![1, 1, 2, 2],
+        false,
+        vec![],
+        None,
+    );
 
-            let mut x_data = Vec::new(); // все признаки
-            let mut y_data = Vec::new(); // one-hot метки
+    // let output = conv2d(&layer, &kernel, (1, 1));
+    // conv2d_backward(&output);
 
-            for line in reader.lines() {
-                let line = line.expect("Ошибка чтения строки");
-                if line.starts_with("Id") || line.trim().is_empty() {
-                    continue; // пропускаем заголовок и пустые строки
-                }
+    let a = Tensor::new(
+        (0..3 * 3 * 4 * 3).map(|f| f as f32).collect(),
+        vec![3, 3, 4, 3],
+        false,
+        vec![],
+        None,
+    );
+    let b = Tensor::new(
+        (0..2 * 3 * 2 * 2).map(|f| f as f32).collect(),
+        vec![2, 3, 2, 2],
+        false,
+        vec![],
+        None,
+    );
 
-                let parts: Vec<&str> = line.split(',').collect();
-                if parts.len() < 6 {
-                    continue;
-                }
+    let output = conv2d(&a, &b, (1, 1));
+    // println!("{}", output);
+    conv2d_backward(&output);
+}
 
-                // Парсим признаки (Id игнорируем, берём колонки 1-4)
-                let sepal_len: f32 = parts[1].parse().unwrap();
-                let sepal_wid: f32 = parts[2].parse().unwrap();
-                let petal_len: f32 = parts[3].parse().unwrap();
-                let petal_wid: f32 = parts[4].parse().unwrap();
+fn conv2d(layer: &Tensor, kernel: &Tensor, stride: (usize, usize)) -> Tensor {
+    println!("LOG: Не забудь учитывать паддинг при расчёте");
 
-                x_data.push(sepal_len);
-                x_data.push(sepal_wid);
-                x_data.push(petal_len);
-                x_data.push(petal_wid);
+    // Блок im2col
 
-                // Парсим класс (колонка 5)
-                let species = parts[5].trim().to_lowercase();
-                let class_index = match species.as_str() {
-                    "iris-setosa" => 0,
-                    "iris-versicolor" => 1,
-                    "iris-virginica" => 2,
-                    _ => continue,
-                };
+    let layer_shape = layer.tensor_data.borrow().shape.clone();
+    let layer_data = layer.tensor_data.borrow().data.clone();
+    let kernel_shape = kernel.tensor_data.borrow().shape.clone();
+    let kernel_data = kernel.tensor_data.borrow().data.clone();
 
-                // Создаём one-hot вектор из 3 элементов
-                let mut one_hot = vec![0.0, 0.0, 0.0];
-                one_hot[class_index] = 1.0;
-                y_data.extend(one_hot);
-            }
+    let x_iter =
+        (layer_shape[layer_shape.len() - 2] - kernel_shape[kernel_shape.len() - 2]) / stride.0 + 1;
+    let y_iter =
+        (layer_shape[layer_shape.len() - 1] - kernel_shape[kernel_shape.len() - 1]) / stride.1 + 1;
 
-            let num_samples = x_data.len() / 4;
+    let mut layer_im_2_col_data: Vec<f32> = Vec::with_capacity(
+        x_iter * y_iter * kernel_shape[2] * kernel_shape[3] * kernel_shape[1] * kernel_shape[0],
+    );
 
-            let x = Tensor::new(x_data, vec![num_samples, 4], false, vec![], None);
-            let y = Tensor::new(y_data, vec![num_samples, 3], false, vec![], None);
+    for image in 0..layer_shape[0] {
+        for x in 0..x_iter {
+            for y in 0..y_iter {
+                for layer in 0..layer_shape[1] {
+                    for local_x in 0..kernel_shape[2] {
+                        for local_y in 0..kernel_shape[3] {
+                            let global_index = image * layer_shape[1] * layer_shape[2] * layer_shape[3] // images
+                                    + layer * layer_shape[2] * layer_shape[3] // layers
+                                    + x * stride.0 * layer_shape[3] + local_x * layer_shape[3] // x
+                                    + y * stride.1 + local_y; // y
 
-            (x, y)
-        }
-
-        fn calculate_accuracy(predictions: &Tensor, targets: &Tensor) -> f32 {
-            let batch_size = predictions.tensor_data.borrow().shape[0];
-            let num_classes = predictions.tensor_data.borrow().shape[1];
-
-            let pred_data = predictions.tensor_data.borrow();
-            let target_data = targets.tensor_data.borrow();
-
-            let mut correct = 0;
-
-            for i in 0..batch_size {
-                let start = i * num_classes;
-
-                // Находим предсказанный класс (индекс максимальной вероятности)
-                let mut pred_class = 0;
-                let mut max_prob = pred_data.data[start];
-                for j in 1..num_classes {
-                    let prob = pred_data.data[start + j];
-                    if prob > max_prob {
-                        max_prob = prob;
-                        pred_class = j;
+                            layer_im_2_col_data.push(layer_data[global_index]);
+                        }
                     }
                 }
-
-                // Находим истинный класс (индекс, где target == 1.0)
-                let mut true_class = 0;
-                for j in 0..num_classes {
-                    if target_data.data[start + j] == 1.0 {
-                        true_class = j;
-                        break;
-                    }
-                }
-
-                if pred_class == true_class {
-                    correct += 1;
-                }
             }
-
-            correct as f32 / batch_size as f32
         }
-
-        let (x, y) = load_iris_data("Iris.csv");
-
-        let mut net = network::Network::new();
-        let (w1, b1) = net.Linear(4, 64);
-        let (w2, b2) = net.Linear(64, 3);
-
-        let forward_fn = |pipa: &Tensor| pipa.matmul(&w1).add(&b1).relu().matmul(&w2).add(&b2);
-
-        net.fit(
-            5000,
-            0.0001,
-            x.clone(),
-            y.clone(),
-            network::Loss::CrossEntropyWithSoftmax,
-            150,
-            1000,
-            forward_fn,
-        );
-        let output = net.forward(&x, forward_fn)._softmax();
-        let acc = calculate_accuracy(&output, &y);
-        assert!(acc > 0.95, "Ожидаемая точность: 0.95. Получено: {}", acc);
-        println!("accuracy: {}", acc);
     }
-    test_iris();
+
+    let temp_tensor = Tensor::new(
+        layer_im_2_col_data,
+        vec![
+            layer_shape[0] * x_iter * y_iter,
+            layer_shape[1] * kernel_shape[2] * kernel_shape[3],
+        ],
+        false,
+        vec![],
+        None,
+    );
+
+    // println!("{}", temp_tensor);
+
+    let temp_kernel = Tensor::new(
+        kernel_data,
+        vec![
+            kernel_shape[0],
+            kernel_shape[2] * kernel_shape[3] * kernel_shape[1],
+        ],
+        true,
+        vec![],
+        None,
+    )
+    .transpose();
+    temp_kernel.tensor_data.borrow_mut().require_grad = true;
+
+    // print!("{}", temp_kernel);
+
+    // Блок с вычислением
+
+    let temp_output = temp_tensor.matmul(&temp_kernel);
+    // println!("{}", temp_output);
+
+    // Блок с col2im
+    let temp_output_shape = temp_output.tensor_data.borrow().shape.clone();
+    temp_output.tensor_data.borrow_mut().operation = Some(Operation::Conv2d(
+        temp_output_shape[0],
+        temp_output_shape[1],
+        stride,
+        (layer_shape[0], layer_shape[1], layer_shape[2], layer_shape[3], ),
+        (kernel_shape[0], kernel_shape[1], kernel_shape[2], kernel_shape[3], ),
+    ));
+    temp_output.tensor_data.borrow_mut().shape =
+        vec![layer_shape[0], kernel_shape[0], x_iter, y_iter];
+
+    let output_data = temp_output.tensor_data.borrow().data.clone();
+    let mut temp_output_data: Vec<f32> = Vec::with_capacity(output_data.capacity());
+    for image in 0..layer_shape[0] {
+        for y in 0..y_iter {
+            for layer in 0..kernel_shape[0] {
+                for x in 0..x_iter {
+                    let local_index = image * kernel_shape[0] * x_iter * y_iter //images
+                    + layer * x_iter * y_iter // layers
+                    + x * y_iter // x
+                    + y; //y
+                    temp_output_data.push(output_data[local_index]);
+                }
+            }
+        }
+    }
+    temp_output.tensor_data.borrow_mut().data = temp_output_data;
+    temp_output.tensor_data.borrow_mut().parents.push(layer.tensor_data.clone());
+    temp_output.tensor_data.borrow_mut().parents.push(kernel.tensor_data.clone());
+
+    // println!("{}", temp_output);
+    temp_output
+}
+
+fn conv2d_backward(conv2d_output: &Tensor) {
+    let parent_layer_im2col = conv2d_output.tensor_data.borrow().parents[0].clone();
+    let parent_kernel_im2col = conv2d_output.tensor_data.borrow().parents[1].clone();
+
+    let parent_layer_orig = conv2d_output.tensor_data.borrow().parents[2].clone();
+
+    // println!("{:?}, {:?}", parent_layer_im2col.borrow().data, parent_kernel_im2col.borrow().data);
+    // println!("{:?}", parent_kernel_im2col.borrow().grad().data);
+
+    conv2d_output.backward();
+
+    let temp_layer_grad = Tensor::new(
+        parent_layer_orig.borrow().grad().data.clone(),
+        vec![3,3,4,3],
+        false,
+        vec![],
+        None,
+    );
+    println!("{}", temp_layer_grad);
 }

@@ -31,7 +31,33 @@ impl Network {
         return (weights, biases);
     }
 
-    // Основной метод: пользователь передаёт замыкание, которое строит граф
+    /// Создаёт свёрточные ядра для слоя Conv2d
+    ///
+    /// # Аргументы
+    /// * `n_layers_C_in` - Количество входных каналов (глубина входного изображения)
+    /// * `n_kernels_C_out` - Количество ядер/выходных каналов
+    /// * `kernel_size` - Размер ядра в формате (строки, столбцы)
+    ///
+    /// # Возвращает
+    /// * `Tensor` - Инициализированные веса ядер свёртки размером
+    ///   \[n_kernels_C_out, layers_C_in, kernel_size.0, kernel_size.1\]
+    pub fn Conv2d(
+        &mut self,
+        n_layers_c_in: usize,
+        n_kernels_c_out: usize,
+        kernel_size: (usize, usize),
+    ) -> Tensor {
+        let kernels = Tensor::uniform(
+            -1.,
+            1.,
+            vec![n_kernels_c_out, n_layers_c_in, kernel_size.0, kernel_size.1],
+            true,
+        );
+        self.parametres.push(kernels.tensor_data.clone());
+        return kernels;
+    }
+
+    /// Основной метод: пользователь передаёт замыкание, которое строит граф
     pub fn forward<F>(&self, data: &Tensor, forward_fn: F) -> Tensor
     where
         F: FnOnce(&Tensor) -> Tensor,
