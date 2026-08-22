@@ -91,6 +91,7 @@ impl Network {
             let mut temp_losses_during_one_epoch: Vec<f32> = vec![];
 
             for (x, y) in batch_iterator.by_ref() {
+
                 let pred = self.forward(&x, &forward_fn);
                 let batch_loss = match loss_function {
                     Loss::MSE => pred.mse(&y),

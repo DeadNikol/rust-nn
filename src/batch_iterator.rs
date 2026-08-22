@@ -49,8 +49,8 @@ impl Iterator for BatchIterator {
 
     fn next(&mut self) -> Option<Self::Item> {
         let num_samples = self.x_data.borrow().shape[0];
-        let x_data_cols = self.x_data.borrow().shape[1];
-        let target_data_cols = self.targets.borrow().shape[1];
+        let x_data_samples: usize = self.x_data.borrow().shape[1..].iter().product();
+        let target_data_cols: usize = self.targets.borrow().shape[1..].iter().product();
 
         if self.current >= num_samples {
             return None;
@@ -64,14 +64,14 @@ impl Iterator for BatchIterator {
         let x_data_ref = self.x_data.borrow();
         let y_data_ref = self.targets.borrow();
 
-        let mut batch_x = Vec::with_capacity(batch_len * x_data_cols);
+        let mut batch_x = Vec::with_capacity(batch_len * x_data_samples);
         let mut batch_y = Vec::with_capacity(batch_len * target_data_cols);
 
         for &idx in &self.indices[start..end] {
-            let x_start = idx * x_data_cols;
+            let x_start = idx * x_data_samples;
             let y_start = idx * target_data_cols;
 
-            batch_x.extend_from_slice(&x_data_ref.data[x_start..x_start + x_data_cols]);
+            batch_x.extend_from_slice(&x_data_ref.data[x_start..x_start + x_data_samples]);
             batch_y.extend_from_slice(&y_data_ref.data[y_start..y_start + target_data_cols]);
         }
 
@@ -79,7 +79,12 @@ impl Iterator for BatchIterator {
 
         let x_batch = Tensor::new(
             batch_x,
-            vec![batch_len, x_data_cols],
+            // vec![batch_len, x_data_samples],
+            {
+                let mut shape = vec![batch_len];
+                shape.extend_from_slice(&self.x_data.borrow().shape[1..]);
+                shape
+            },
             false,
             vec![],
             None,
@@ -87,7 +92,12 @@ impl Iterator for BatchIterator {
 
         let y_batch = Tensor::new(
             batch_y,
-            vec![batch_len, target_data_cols],
+            // vec![batch_len, target_data_cols],
+            {
+                let mut shape = vec![batch_len];
+                shape.extend_from_slice(&self.targets.borrow().shape[1..]);
+                shape
+            },
             false,
             vec![],
             None,
