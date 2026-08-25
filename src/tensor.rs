@@ -4,12 +4,9 @@ use crate::graph;
 use rand::RngExt;
 use rayon::prelude::*;
 use std::{
-    cell::RefCell,
-    clone,
-    env::current_exe,
-    fmt::{self},
-    rc::Rc,
+    cell::RefCell, clone, env::current_exe, fmt::{self}, path::Path, rc::Rc,
 };
+use image::{ImageReader, DynamicImage, GenericImageView};
 
 /// Перечисляет операции, которые могли породить тензор
 #[derive(Debug)]
@@ -525,6 +522,76 @@ impl Tensor {
         let data: Vec<f32> = (0..len).map(|_| rng.random_range(low..high)).collect();
         return Self::new(data, shape, require_grad, Vec::new(), None);
     }
+
+    pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+        let img = ImageReader::open(&path)
+            .map_err(|e| format!("Не удалось открыть файл: {}", e))?
+            .decode()
+            .map_err(|e| format!("Не удалось декодировать изображение: {}", e))?;
+
+        let (width, height) = img.dimensions();
+        let channels = match img {
+            DynamicImage::ImageLuma8(_) => 1,
+            DynamicImage::ImageRgb8(_) => 3,
+            DynamicImage::ImageRgba8(_) => 4,
+            _ => 3, // fallback
+        };
+
+        let mut data = Vec::with_capacity((width * height * channels) as usize);
+
+        // Собираем пиксели в формате [channels, height, width]
+        match img {
+            DynamicImage::ImageLuma8(img) => {
+                // Grayscale: один канал
+                for pixel in img.pixels() {
+                    data.push(pixel[0] as f32 / 255.0);
+                }
+            }
+            DynamicImage::ImageRgb8(img) => {
+                // RGB: переставляем в формат [R..., G..., B...]
+                let size = (width * height) as usize;
+                let mut red = vec![0.0; size];
+                let mut green = vec![0.0; size];
+                let mut blue = vec![0.0; size];
+
+                for (i, pixel) in img.pixels().enumerate() {
+                    red[i] = pixel[0] as f32 / 255.0;
+                    green[i] = pixel[1] as f32 / 255.0;
+                    blue[i] = pixel[2] as f32 / 255.0;
+                }
+
+                data.extend(red);
+                data.extend(green);
+                data.extend(blue);
+            }
+            DynamicImage::ImageRgba8(img) => {
+                // RGBA: берём RGB, игнорируем альфа
+                let size = (width * height) as usize;
+                let mut red = vec![0.0; size];
+                let mut green = vec![0.0; size];
+                let mut blue = vec![0.0; size];
+
+                for (i, pixel) in img.pixels().enumerate() {
+                    red[i] = pixel[0] as f32 / 255.0;
+                    green[i] = pixel[1] as f32 / 255.0;
+                    blue[i] = pixel[2] as f32 / 255.0;
+                }
+
+                data.extend(red);
+                data.extend(green);
+                data.extend(blue);
+            }
+            _ => {
+                return Err("Неподдерживаемый формат изображения".to_string());
+            }
+        }
+
+        // Форма: [channels, height, width]
+        let shape = vec![channels as usize, height as usize, width as usize];
+
+        Ok(Tensor::new(data, shape, false, vec![], None))
+    }
+
     /// Обнуляет градиент, что бы он не накапливался после `backward()`
     #[allow(dead_code)]
     pub fn zero_grad(&self) {
