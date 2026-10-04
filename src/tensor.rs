@@ -1,12 +1,19 @@
 //! В этом крейте прописаны классы Тензора, данных тензора, функции над тензорами, операция взятия производной, перечисление операций
 
-use crate::graph;
+use crate::{
+    addictive_functions::{self, col2im, im2col}, graph,
+};
+use image::{DynamicImage, GenericImageView, ImageReader};
 use rand::RngExt;
 use rayon::prelude::*;
 use std::{
-    cell::RefCell, clone, env::current_exe, fmt::{self}, path::Path, rc::Rc,
+    cell::RefCell,
+    clone,
+    env::current_exe,
+    fmt::{self},
+    path::Path,
+    rc::Rc,
 };
-use image::{ImageReader, DynamicImage, GenericImageView};
 
 /// Перечисляет операции, которые могли породить тензор
 #[derive(Debug)]
@@ -18,16 +25,11 @@ pub enum Operation {
     Sigmoid,
     Tanh,
     CrossEntropyWithSoftmax,
-    /// Содержит в себе оригинальную размерность `[x,y, (stride_x, stride_y), (original_layer_images, original_layer_layers, original_layer_x, original_layer_y),`
-    /// `(original_kernel_images, original_kernel_layers, original_kernel_x, original_kernel_y)]`,
-    /// которая нужна при взятии производной
-    ///
+    /// Содержит в себе stride (x, y) и
+    /// Результат matmul после im2col
     Conv2d(
-        usize,
-        usize,
-        (usize, usize),
-        (usize, usize, usize, usize),
-        (usize, usize, usize, usize),
+        (usize, usize), //stride
+        Tensor,         // результат матмула после im2col
     ),
     /// Содержит в себе значения добавлений: `[слева, справа, сверху, снизу]`
     Padding(usize, usize, usize, usize),
@@ -37,6 +39,7 @@ pub enum Operation {
 }
 
 /// Внутренние данные тензора. Хранятся как Rc<RefCell<TensorData>>>
+#[derive(Debug)]
 pub struct TensorData {
     /// Сами данные тензора
     pub data: Vec<f32>, // Само значение тензора. Оно будет плоским, обращение к строкам и тому подобное будет только через индексы. Срезов, как numpy пока не планируется
@@ -119,10 +122,12 @@ impl TensorData {
         let b = &right_tensor.data;
 
         // Параллельная обработка строк
-        let output_data: Vec<f32> = (0..m)
-            .into_par_iter()
-            .flat_map(|i| {
-                let mut row = vec![0.0; n];
+
+        let mut output_data = vec![0.0; m * n];
+        output_data
+            .par_chunks_mut(n)
+            .enumerate()
+            .for_each(|(i, row)| {
                 for l in 0..k {
                     let a_il = a[i * k + l];
                     let b_row = &b[l * n..(l + 1) * n];
@@ -130,9 +135,7 @@ impl TensorData {
                         row[j] += a_il * b_row[j];
                     }
                 }
-                row
-            })
-            .collect();
+            });
         output_data
     }
 
@@ -488,6 +491,7 @@ impl TensorData {
 }
 
 /// Объект Тензора. Хранит в себе `TensorData`
+#[derive(Debug)]
 pub struct Tensor {
     pub tensor_data: Rc<RefCell<TensorData>>,
 }
@@ -735,8 +739,8 @@ impl Tensor {
     }
     /// Средняя квадратичная ошибка
     #[allow(dead_code)]
-    pub fn mse(&self, y_true: &Tensor) -> Tensor {
-        let output = self.tensor_data.borrow().mse(&y_true.tensor_data.borrow());
+    pub fn mse(&self, target: &Tensor) -> Tensor {
+        let output = self.tensor_data.borrow().mse(&target.tensor_data.borrow());
 
         let require_grad = {
             if self.tensor_data.borrow().require_grad {
@@ -750,7 +754,7 @@ impl Tensor {
             vec![output],
             vec![1],
             require_grad,
-            vec![self.tensor_data.clone(), y_true.tensor_data.clone()],
+            vec![self.tensor_data.clone(), target.tensor_data.clone()],
             Some(Operation::MSE),
         )
     }
@@ -782,12 +786,17 @@ impl Tensor {
     }
 
     pub fn conv2d(&self, kernel: &Tensor, stride: (usize, usize)) -> Tensor {
-        // println!("LOG: Нарушено едиоонбразие - этого метода нет в TensorData, а должен бы быть");
-
-        // Блок im2col
-
+        assert!(
+            self.tensor_data.borrow().shape.len() == 4,
+            "Свёртку можно проводить только над тензором размерности 4. Получено: {}",
+            self.tensor_data.borrow().shape.len()
+        );
+        assert!(
+            kernel.tensor_data.borrow().shape.len() == 4,
+            "Свёртку можно проводить только ядром размерности 4. Получено: {}",
+            kernel.tensor_data.borrow().shape.len()
+        );
         let layer_shape = self.tensor_data.borrow().shape.clone();
-        let layer_data = self.tensor_data.borrow().data.clone();
         let kernel_shape = kernel.tensor_data.borrow().shape.clone();
         let kernel_data = kernel.tensor_data.borrow().data.clone();
 
@@ -798,42 +807,11 @@ impl Tensor {
             / stride.1
             + 1;
 
-        let mut layer_im_2_col_data: Vec<f32> = Vec::with_capacity(
-            x_iter * y_iter * kernel_shape[2] * kernel_shape[3] * kernel_shape[1] * kernel_shape[0],
-        );
+        // ===== im2col =====
+        let temp_tensor = im2col(self.clone(), kernel_shape.clone(), stride.clone());
+        temp_tensor.tensor_data.borrow_mut().require_grad = true;
 
-        for image in 0..layer_shape[0] {
-            for x in 0..x_iter {
-                for y in 0..y_iter {
-                    for layer in 0..layer_shape[1] {
-                        for local_x in 0..kernel_shape[2] {
-                            for local_y in 0..kernel_shape[3] {
-                                let global_index = image * layer_shape[1] * layer_shape[2] * layer_shape[3] // images
-                                    + layer * layer_shape[2] * layer_shape[3] // layers
-                                    + x * stride.0 * layer_shape[3] + local_x * layer_shape[3] // x
-                                    + y * stride.1 + local_y; // y
-
-                                layer_im_2_col_data.push(layer_data[global_index]);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let temp_tensor = Tensor::new(
-            layer_im_2_col_data,
-            vec![
-                layer_shape[0] * x_iter * y_iter,
-                layer_shape[1] * kernel_shape[2] * kernel_shape[3],
-            ],
-            false,
-            vec![],
-            None,
-        );
-
-        // println!("{}", temp_tensor);
-
+        // ===== Подготовка ядра =====
         let temp_kernel = Tensor::new(
             kernel_data,
             vec![
@@ -845,66 +823,54 @@ impl Tensor {
             None,
         )
         .transpose();
-        temp_kernel.tensor_data.borrow_mut().require_grad = true;
 
-        // print!("{}", temp_kernel);
+        // ===== matmul =====
+        let output = temp_tensor.matmul(&temp_kernel);
+        let output_clone = temp_tensor.matmul(&temp_kernel);
 
-        // Блок с вычислением
-
-        let temp_output = temp_tensor.matmul(&temp_kernel);
-        // println!("{}", temp_output);
-
-        // Блок с col2im
-        let temp_output_shape = temp_output.tensor_data.borrow().shape.clone();
-        temp_output.tensor_data.borrow_mut().operation = Some(Operation::Conv2d(
-            temp_output_shape[0],
-            temp_output_shape[1],
-            stride,
-            (
-                layer_shape[0],
-                layer_shape[1],
-                layer_shape[2],
-                layer_shape[3],
-            ),
-            (
-                kernel_shape[0],
-                kernel_shape[1],
-                kernel_shape[2],
-                kernel_shape[3],
-            ),
-        ));
-        temp_output.tensor_data.borrow_mut().shape =
+        // ===== col2im =====
+        output.tensor_data.borrow_mut().operation = Some(Operation::Conv2d(stride, output_clone));
+        output.tensor_data.borrow_mut().shape =
             vec![layer_shape[0], kernel_shape[0], x_iter, y_iter];
 
-        let output_data = temp_output.tensor_data.borrow().data.clone();
-        let mut temp_output_data: Vec<f32> = Vec::with_capacity(output_data.capacity());
-        for image in 0..layer_shape[0] {
-            for y in 0..y_iter {
-                for layer in 0..kernel_shape[0] {
-                    for x in 0..x_iter {
-                        let local_index = image * kernel_shape[0] * x_iter * y_iter //images
-                            + layer * x_iter * y_iter // layers
-                            + x * y_iter // x
-                            + y; //y
-                        temp_output_data.push(output_data[local_index]);
+        let output_data = output.tensor_data.borrow().data.clone();
+        let mut temp_output_data = vec![0.0; output_data.len()];
+
+        let layer_len = x_iter * y_iter;
+        let image_len = kernel_shape[0] * layer_len;
+
+        temp_output_data
+            .par_chunks_mut(kernel_shape[0] * x_iter * y_iter)
+            .enumerate()
+            .for_each(|(image, chunk)| {
+                for y in 0..y_iter {
+                    for layer in 0..kernel_shape[0] {
+                        for x in 0..x_iter {
+                            let local_index = layer * layer_len + x * y_iter + y;
+                            let global_index = local_index + image * image_len;
+                            chunk[local_index] = output_data[global_index];
+                        }
                     }
                 }
-            }
-        }
-        temp_output.tensor_data.borrow_mut().data = temp_output_data;
-        temp_output
+            });
+
+        output.tensor_data.borrow_mut().data = temp_output_data;
+        output
             .tensor_data
             .borrow_mut()
             .parents
             .push(self.tensor_data.clone());
-        temp_output
+        output
             .tensor_data
             .borrow_mut()
             .parents
             .push(kernel.tensor_data.clone());
 
-        // println!("{}", temp_output);
-        temp_output
+        output
+    }
+
+    pub fn shape(&self) -> Vec<usize> {
+        self.tensor_data.borrow().shape.clone()
     }
 
     pub fn reshape(&self, new_shape: Vec<usize>) -> Tensor {
@@ -934,6 +900,7 @@ impl Tensor {
     }
 
     fn add_grad(parent: Rc<RefCell<TensorData>>, new_grad: Vec<f32>) {
+        // println!("add_grad new_grad: {:?}", new_grad);
         let mut pipa = parent.borrow_mut();
         if pipa.grad.is_empty() {
             pipa.grad = new_grad;
@@ -947,14 +914,20 @@ impl Tensor {
     pub fn backward(&self) {
         let start_node = self.tensor_data.clone();
         let basic_grad = vec![1.; start_node.borrow().shape.iter().product()];
-        start_node.borrow_mut().grad = basic_grad;
+        if start_node.borrow().grad.len() == 0 {
+            start_node.borrow_mut().grad = basic_grad;
+        }
         let graph = graph::Graph::new(start_node).build_topo();
+        // println!("graph size: {}", graph.len());
 
         for i in graph.iter().rev() {
-            // println!("{:?}", i.borrow().operation);
-            if !i.borrow().require_grad {
+            if !i.borrow().require_grad || i.borrow().operation.is_none() {
                 continue;
             }
+
+            // println!("Operation: {:?}", i.borrow().operation);
+            // println!("grad: {:?}", i.borrow().grad);
+
             let current_node = i.borrow();
             let current_node_grad = TensorData::new(
                 current_node.grad.clone(),
@@ -963,6 +936,9 @@ impl Tensor {
                 vec![],
                 None,
             );
+
+            // let pipa = op_name(&current_node.operation);
+            // addictive_functions::print_grad_stats(pipa, &current_node_grad.data);
 
             match current_node.operation {
                 Some(Operation::Matmul) => {
@@ -1055,95 +1031,69 @@ impl Tensor {
 
                     Self::add_grad(current_node.parents[0].clone(), grad);
                 }
-                Some(Operation::Conv2d(
-                    original_x,
-                    original_y,
-                    (stride_x, stride_y),
-                    original_layer_shape,
-                    original_kernel_shape,
-                )) => {
-                    let mut temp_current_node_grad_data: Vec<f32> =
-                        Vec::with_capacity(current_node_grad.data.capacity());
+                Some(Operation::Conv2d((stride_x, stride_y), ref matmul_after_im2col)) => {
+                    // 1. Достаём родителей ДО backward (нужны нам для форм)
+                    let (input_col, kernel) = {
+                        let td = matmul_after_im2col.tensor_data.borrow();
+                        (td.parents[0].clone(), td.parents[1].clone())
+                    };
 
-                    for image in 0..current_node_grad.shape[0] {
-                        for y in 0..current_node_grad.shape[3] {
-                            for layer in 0..current_node_grad.shape[1] {
-                                for x in 0..current_node_grad.shape[2] {
-                                    let original_index = image * current_node_grad.shape[1] * current_node_grad.shape[2] * current_node_grad.shape[3] //images
-                                        + layer * current_node_grad.shape[2] * current_node_grad.shape[3]  // layers
-                                        + x * current_node_grad.shape[3]  // x
-                                        + y; //y
-                                    temp_current_node_grad_data
-                                        .push(current_node_grad.data[original_index]);
-                                }
-                            }
-                        }
-                    }
+                    // 2. Затравка grad'а у matmul_after_im2col
+                    //    ВАЖНО: форма должна совпадать с формой matmul_after_im2col в прямом проходе!
+                    //    Если matmul_after_im2col имеет форму [N*out_H*out_W, out_C],
+                    //    то и grad должен быть той же формы.
+                    let grad_shape = matmul_after_im2col.tensor_data.borrow().shape.clone();
+                    matmul_after_im2col.tensor_data.borrow_mut().grad =
+                        current_node_grad.data.clone();
+                    // если нужно reshape — сделай его здесь:
+                    // matmul_after_im2col.tensor_data.borrow_mut().grad =
+                    //     Some(reshape(current_node_grad.data.clone(), grad_shape));
 
-                    let current_shape = current_node.shape.clone();
-                    let temp_current_node_grad = TensorData::new(
-                        temp_current_node_grad_data,
-                        vec![original_x, original_y],
-                        false,
-                        current_node.parents.clone(),
-                        Some(Operation::Matmul),
-                    );
+                    // 3. Один backward прогоняет градиент через matmul → в im2col(x) и в W
+                    matmul_after_im2col.backward();
 
-                    let grad_left = temp_current_node_grad
-                        .matmul(&current_node.parents[1].borrow().transpose());
-                    let mut temp_left_grad: Vec<f32> = vec![
-                        0.0;
-                        original_layer_shape.0
-                            * original_layer_shape.1
-                            * original_layer_shape.2
-                            * original_layer_shape.3
-                    ];
-                    let mut temp_original_indices: Vec<usize> =
-                        Vec::with_capacity(current_shape.capacity());
-                    for image in 0..original_layer_shape.0 {
-                        for x in 0..current_shape[2] {
-                            for y in 0..current_shape[3] {
-                                for layer in 0..original_layer_shape.1 {
-                                    for local_x in 0..original_kernel_shape.2 {
-                                        for local_y in 0..original_kernel_shape.3 {
-                                            let global_index = image * original_layer_shape.1 * original_layer_shape.2 * original_layer_shape.3 // images
-                                                + layer * original_layer_shape.2 * original_layer_shape.3 // layers
-                                                + x * stride_x * original_layer_shape.3 + local_x * original_layer_shape.3 // x
-                                                + y * stride_y + local_y; // y
+                    // 4. Теперь grad_col и grad_W уже посчитаны
+                    let grad_col = input_col.borrow().grad.clone();
+                    let grad_w = kernel.borrow().grad.clone();
 
-                                            temp_original_indices.push(global_index);
-                                            // println!("Backward col2im: {}", global_index);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    grad_left
-                        .iter()
-                        .zip(temp_original_indices)
-                        .for_each(|(value, index)| {
-                            temp_left_grad[index] += *value;
-                        });
+                    // 5. col2im раскидывает градиент по im2col обратно в форму входа
+                    let input_shape = current_node.parents[2].borrow().shape.clone(); // [N, C, H, W]
+                    let kernel_shape = current_node.parents[3].borrow().shape.clone(); // [out_C, C, kH, kW]
+                    let n = input_shape[0];
+                    let c = input_shape[1];
+                    let h = input_shape[2];
+                    let w = input_shape[3];
+                    let kh = kernel_shape[2];
+                    let kw = kernel_shape[3];
+                    let out_h = (h - kh) / stride_x + 1;
+                    let out_w = (w - kw) / stride_y + 1;
 
-                    let grad_right = current_node.parents[0]
-                        .borrow()
-                        .transpose()
-                        .matmul(&temp_current_node_grad);
-                    let temp_grad_right = TensorData::new(
-                        grad_right.clone(),
-                        current_node.parents[1].borrow().shape.clone(),
+                    let grad_col_tensor = Tensor::new(
+                        grad_col,
+                        vec![n * out_h * out_w, c * kh * kw],
                         false,
                         vec![],
                         None,
-                    )
-                    .transpose()
-                    .data;
+                    );
 
-                    Self::add_grad(current_node.parents[0].clone(), grad_left);
-                    Self::add_grad(current_node.parents[2].clone(), temp_left_grad);
-                    Self::add_grad(current_node.parents[1].clone(), temp_grad_right.clone());
-                    Self::add_grad(current_node.parents[3].clone(), temp_grad_right);
+                    let layer_grad = col2im(
+                        grad_col_tensor,
+                        input_shape,
+                        kernel_shape,
+                        (stride_x, stride_y),
+                    )
+                    .tensor_data
+                    .borrow()
+                    .data
+                    .clone();
+
+                    // 6. Градиент по W — уже правильной формы (reshape не нужен, если shape совпадает)
+                    //    Если grand_parents1.grad имеет форму [out_C, C*kH*kW], а тебе нужна
+                    //    форма [out_C, C, kH, kW] — reshape'ни:
+                    let kernel_grad = grad_w; // при необходимости: reshape(grad_w, kernel_shape)
+
+                    Self::add_grad(current_node.parents[2].clone(), layer_grad);
+                    Self::add_grad(current_node.parents[3].clone(), kernel_grad);
                 }
                 Some(Operation::Padding(pad_top, pad_bot, pad_left, pad_right)) => {
                     let grad_output = &current_node_grad.data;
@@ -1182,7 +1132,8 @@ impl Tensor {
                     Self::add_grad(current_node.parents[0].clone(), grad_input);
                 }
                 Some(Operation::Reshape) => {
-                    let grad = vec![1.0; current_node_grad.shape.clone().iter().product()];
+                    // let grad = vec![1.0; current_node_grad.shape.clone().iter().product()];
+                    let grad = current_node_grad.data.clone();
                     Self::add_grad(current_node.parents[0].clone(), grad);
                 }
                 Some(Operation::MaxPool(kernel_shape, stride)) => {
@@ -1293,5 +1244,22 @@ impl Clone for Tensor {
         Self {
             tensor_data: self.tensor_data.clone(),
         }
+    }
+}
+
+fn op_name(op: &Option<Operation>) -> &'static str {
+    match op {
+        None => "None",
+        Some(Operation::Matmul) => "Matmul",
+        Some(Operation::Add) => "Add",
+        Some(Operation::ReLu) => "ReLu",
+        Some(Operation::MSE) => "MSE",
+        Some(Operation::Sigmoid) => "Sigmoid",
+        Some(Operation::Tanh) => "Tanh",
+        Some(Operation::CrossEntropyWithSoftmax) => "CrossEntropyWithSoftmax",
+        Some(Operation::Conv2d(..)) => "Conv2d",
+        Some(Operation::Padding(..)) => "Padding",
+        Some(Operation::Reshape) => "Reshape",
+        Some(Operation::MaxPool(..)) => "MaxPool",
     }
 }

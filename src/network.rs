@@ -1,9 +1,9 @@
 //! Крейт с структурой Нейронной Сети, содержащей в себе параметры модели
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, io::Write, rc::Rc, time::Instant};
 
 use crate::{
-    batch_iterator::{self, BatchIterator},
+    batch_iterator::{self, BatchIterator, DataSource},
     optims::SGD,
     tensor::{Tensor, TensorData},
 };
@@ -69,8 +69,8 @@ impl Network {
         &self,
         epochs: usize,
         lr: f32,
-        data: Tensor,
-        y_true: Tensor,
+        data: DataSource,
+        targets: DataSource,
         loss_function: Loss,
         batch_size: usize,
         verbose: usize,
@@ -82,16 +82,18 @@ impl Network {
 
         let mut losses: Vec<f32> = vec![];
 
+        let mut batch_iterator = BatchIterator::new(data.clone(), targets.clone(), batch_size);
+
         for epoch in 0..epochs {
-            let mut batch_iterator = BatchIterator::new(
-                data.tensor_data.clone(),
-                y_true.tensor_data.clone(),
-                batch_size,
-            );
+            let mut index = 0;
+            println!("epoch: {},", epoch); // batch: ", epoch);
+
             let mut temp_losses_during_one_epoch: Vec<f32> = vec![];
+            let mut temp_accuracy_during_one_epoch: Vec<f32> = vec![];
 
             for (x, y) in batch_iterator.by_ref() {
-
+                // print!(" {}", index);
+                index += 1;
                 let pred = self.forward(&x, &forward_fn);
                 let batch_loss = match loss_function {
                     Loss::MSE => pred.mse(&y),
@@ -101,10 +103,13 @@ impl Network {
                 optimizer.backward_step();
 
                 temp_losses_during_one_epoch.push(batch_loss.tensor_data.borrow().data[0].clone());
-                // optimizer.backward_step(&loss);
+    
+                let acc = accuracy(&pred, &y);
+                temp_accuracy_during_one_epoch.push(acc);
             }
+            print!("\n");
+
             batch_iterator.reset_indices();
-            // optimizer.backward_step();
 
             let total: f32 = temp_losses_during_one_epoch.iter().sum();
             let epoch_loss = total / temp_losses_during_one_epoch.len() as f32;
@@ -112,6 +117,13 @@ impl Network {
             if verbose != 0 && epoch % verbose == 0 {
                 println!("epoch {}: loss - {}", epoch, epoch_loss);
             }
+
+            let total: f32 = temp_accuracy_during_one_epoch.iter().sum();
+            let epoch_acc = total / temp_accuracy_during_one_epoch.len() as f32;
+            if verbose != 0 && epoch % verbose == 0 {
+                println!("epoch {}: accuracy - {}", epoch, epoch_acc);
+            }
+
         }
         plot_losses(&losses, "loss_plot.png").unwrap();
     }
@@ -157,4 +169,31 @@ pub fn plot_losses(losses: &[f32], output_path: &str) -> Result<(), Box<dyn std:
         .draw()?;
 
     Ok(())
+}
+
+fn accuracy(pred: &Tensor, target: &Tensor) -> f32 {
+    let pred_data = pred.tensor_data.borrow();
+    let target_data = target.tensor_data.borrow();
+    let rows = pred_data.shape[0];
+    let cols = pred_data.shape[1];
+    let mut correct = 0;
+    for r in 0..rows {
+        let start = r * cols;
+        let pred_class = pred_data.data[start..start + cols]
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i)
+            .unwrap();
+        let target_class = target_data.data[start..start + cols]
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i)
+            .unwrap();
+        if pred_class == target_class {
+            correct += 1;
+        }
+    }
+    correct as f32 / rows as f32
 }
