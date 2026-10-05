@@ -3,7 +3,7 @@ use rayon::{
     slice::ParallelSliceMut,
 };
 
-use crate::tensor::{Tensor, TensorData};
+use crate::tensor::tensor::{Tensor, Operation};
 
 pub fn im2col(tensor: Tensor, kernel_shape: Vec<usize>, stride: (usize, usize)) -> Tensor {
     let tensor_shape = tensor.tensor_data.borrow().shape.clone();
@@ -169,3 +169,20 @@ pub fn print_grad_stats(name: &str, g: &[f32]) {
     );
 }
 
+
+pub fn op_name(op: &Option<Operation>) -> &'static str {
+    match op {
+        None => "None",
+        Some(Operation::Matmul) => "Matmul",
+        Some(Operation::Add) => "Add",
+        Some(Operation::ReLu) => "ReLu",
+        Some(Operation::MSE) => "MSE",
+        Some(Operation::Sigmoid) => "Sigmoid",
+        Some(Operation::Tanh) => "Tanh",
+        Some(Operation::CrossEntropyWithSoftmax) => "CrossEntropyWithSoftmax",
+        Some(Operation::Conv2d(..)) => "Conv2d",
+        Some(Operation::Padding(..)) => "Padding",
+        Some(Operation::Reshape) => "Reshape",
+        Some(Operation::MaxPool(..)) => "MaxPool",
+    }
+}

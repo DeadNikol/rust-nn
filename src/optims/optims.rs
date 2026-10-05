@@ -3,13 +3,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::tensor::*;
+use crate::tensor::tensor::*;
 
 pub struct SGD {
     pub parametres: Vec<Rc<RefCell<TensorData>>>,
     pub lr: f32,
     pub momentum: f32,
-    velosity: Vec<Vec<f32>>,
+    pub velosity: Vec<Vec<f32>>,
 }
 
 impl SGD {

@@ -3,18 +3,6 @@
 version = 4
 
 [[package]]
-name = "NN"
-version = "0.1.0"
-dependencies = [
- "csv",
- "image 0.25.10",
- "itertools",
- "plotters",
- "rand 0.10.1",
- "rayon",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -936,6 +924,18 @@ name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
+
+[[package]]
+name = "nn"
+version = "0.1.0"
+dependencies = [
+ "csv",
+ "image 0.25.10",
+ "itertools",
+ "plotters",
+ "rand 0.10.1",
+ "rayon",
+]
 
 [[package]]
 name = "no_std_io2"

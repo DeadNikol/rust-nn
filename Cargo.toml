@@ -1,7 +1,15 @@
 [package]
-name = "NN"
+name = "nn"
 version = "0.1.0"
 edition = "2024"
+
+[lib]
+name = "nn_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nn_bin"
+path = "src/main.rs"
 
 [dependencies]
 csv = "1.4.0"
@@ -13,3 +21,4 @@ rayon = "1.12.0"
 
 [features]
 slow = []
+later = []

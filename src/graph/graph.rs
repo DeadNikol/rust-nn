@@ -1,7 +1,7 @@
 //! Крейт для графа вычислений. Содержит только определение структуры и создание графа.
+//! 
 use std::{cell::RefCell, collections::HashSet, rc::Rc};
-
-use crate::tensor::{Operation, Tensor, TensorData};
+use crate::tensor::tensor::TensorData;
 
 /// Структура графа. В себе при создании должна содержать только один тензор, от которого и будет искать граф вычислений
 pub struct Graph {

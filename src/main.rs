@@ -1,24 +1,15 @@
-use crate::network::Loss;
-use batch_iterator::DataSource;
+use nn_lib::tensor::tensor::Tensor;
+use nn_lib::network::network::Loss;
+use nn_lib::batch_iterator::batch_iterator::DataSource;
+use nn_lib::network::network::Network;
 use rayon::prelude::*;
 use std::fs;
-
-mod addictive_functions;
-mod batch_iterator;
-mod graph;
-mod layers;
-mod network;
-mod optims;
-mod tensor;
 
 use std::time::Instant; // Замеряет время выполенения функций
 // let start = Instant::now();
 // println!("some code");
 // let elapsed = start.elapsed();
 // println!("Timer: {:?}", elapsed);
-
-#[cfg(test)]
-mod unit_tests;
 
 fn main() {
     // test_gradients_rust();
@@ -27,7 +18,6 @@ fn main() {
     train_mnist();
 }
 
-use crate::tensor::Tensor;
 use image::ImageReader;
 
 /// Загружает подмножество MNIST (train или test)
@@ -149,7 +139,7 @@ fn test_mnist() {
 
     println!("Данные готовы");
     // ===== 2. Архитектура сети =====
-    let mut net = network::Network::new();
+    let mut net = Network::new();
 
     // Свёрточные слои
     let conv1 = net.Conv2d(1, 32, (3, 3));
@@ -320,7 +310,7 @@ fn train_mnist() {
     let (x_source, y_source) = load_mnist_subset(10_000);
 
     // Создаём сеть
-    let mut net = network::Network::new();
+    let mut net = Network::new();
 
     // Архитектура (3 свёрточных слоя)
     let conv1 = net.Conv2d(1, 32, (3, 3));

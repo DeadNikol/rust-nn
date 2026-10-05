@@ -1,15 +1,15 @@
 //! В этом крейте прописаны классы Тензора, данных тензора, функции над тензорами, операция взятия производной, перечисление операций
 
-use crate::{
-    addictive_functions::{self, col2im, im2col}, graph,
-};
+// use crate::{
+//     addictive_functions::{self, col2im, im2col}, graph,
+// };
+use super::addictive_functions::{col2im, im2col};
+use crate::graph::graph;
 use image::{DynamicImage, GenericImageView, ImageReader};
 use rand::RngExt;
 use rayon::prelude::*;
 use std::{
     cell::RefCell,
-    clone,
-    env::current_exe,
     fmt::{self},
     path::Path,
     rc::Rc,
@@ -1020,7 +1020,7 @@ impl Tensor {
                     let grad: Vec<f32> = {
                         let y_pred = current_node.parents[0].borrow();
                         let y_true = current_node.parents[1].borrow();
-                        let n = y_pred.shape[1] as f32;
+                        let n = y_pred.shape[0] as f32;
                         y_pred
                             .data
                             .iter()
@@ -1244,22 +1244,5 @@ impl Clone for Tensor {
         Self {
             tensor_data: self.tensor_data.clone(),
         }
-    }
-}
-
-fn op_name(op: &Option<Operation>) -> &'static str {
-    match op {
-        None => "None",
-        Some(Operation::Matmul) => "Matmul",
-        Some(Operation::Add) => "Add",
-        Some(Operation::ReLu) => "ReLu",
-        Some(Operation::MSE) => "MSE",
-        Some(Operation::Sigmoid) => "Sigmoid",
-        Some(Operation::Tanh) => "Tanh",
-        Some(Operation::CrossEntropyWithSoftmax) => "CrossEntropyWithSoftmax",
-        Some(Operation::Conv2d(..)) => "Conv2d",
-        Some(Operation::Padding(..)) => "Padding",
-        Some(Operation::Reshape) => "Reshape",
-        Some(Operation::MaxPool(..)) => "MaxPool",
     }
 }

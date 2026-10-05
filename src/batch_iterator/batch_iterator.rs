@@ -1,7 +1,6 @@
 //! pipasosia
 
-use crate::tensor::{Tensor, TensorData};
-use image::GenericImageView;
+use crate::tensor::tensor::{Tensor, TensorData};
 use rand::rng;
 use rand::seq::SliceRandom;
 use std::cell::RefCell;
@@ -65,11 +64,11 @@ impl DataSource {
 }
 
 pub struct BatchIterator {
-    x_source: DataSource,
-    y_source: DataSource,
-    batch_size: usize,
-    indices: Vec<usize>,
-    current: usize,
+    pub(crate) x_source: DataSource,
+    pub(crate) y_source: DataSource,
+    pub(crate) batch_size: usize,
+    pub(crate) indices: Vec<usize>,
+    pub(crate) current: usize,
 }
 
 impl BatchIterator {

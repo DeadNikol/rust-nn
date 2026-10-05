@@ -1,11 +1,11 @@
 //! Крейт с структурой Нейронной Сети, содержащей в себе параметры модели
 
-use std::{cell::RefCell, io::Write, rc::Rc, time::Instant};
+use std::{cell::RefCell, rc::Rc};
 
 use crate::{
-    batch_iterator::{self, BatchIterator, DataSource},
-    optims::SGD,
-    tensor::{Tensor, TensorData},
+    batch_iterator::batch_iterator::{BatchIterator, DataSource},
+    optims::optims::SGD,
+    tensor::tensor::{Tensor, TensorData},
 };
 
 pub enum Loss {
@@ -85,15 +85,15 @@ impl Network {
         let mut batch_iterator = BatchIterator::new(data.clone(), targets.clone(), batch_size);
 
         for epoch in 0..epochs {
-            let mut index = 0;
-            println!("epoch: {},", epoch); // batch: ", epoch);
+            // let mut index = 0;
+            // println!("epoch: {},", epoch); // batch: ", epoch);
 
             let mut temp_losses_during_one_epoch: Vec<f32> = vec![];
             let mut temp_accuracy_during_one_epoch: Vec<f32> = vec![];
 
             for (x, y) in batch_iterator.by_ref() {
                 // print!(" {}", index);
-                index += 1;
+                // index += 1;
                 let pred = self.forward(&x, &forward_fn);
                 let batch_loss = match loss_function {
                     Loss::MSE => pred.mse(&y),
@@ -103,11 +103,11 @@ impl Network {
                 optimizer.backward_step();
 
                 temp_losses_during_one_epoch.push(batch_loss.tensor_data.borrow().data[0].clone());
-    
+
                 let acc = accuracy(&pred, &y);
                 temp_accuracy_during_one_epoch.push(acc);
             }
-            print!("\n");
+            // print!("\n");
 
             batch_iterator.reset_indices();
 
@@ -123,7 +123,6 @@ impl Network {
             if verbose != 0 && epoch % verbose == 0 {
                 println!("epoch {}: accuracy - {}", epoch, epoch_acc);
             }
-
         }
         plot_losses(&losses, "loss_plot.png").unwrap();
     }
@@ -171,7 +170,7 @@ pub fn plot_losses(losses: &[f32], output_path: &str) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-fn accuracy(pred: &Tensor, target: &Tensor) -> f32 {
+pub fn accuracy(pred: &Tensor, target: &Tensor) -> f32 {
     let pred_data = pred.tensor_data.borrow();
     let target_data = target.tensor_data.borrow();
     let rows = pred_data.shape[0];
