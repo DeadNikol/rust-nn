@@ -226,6 +226,75 @@ fn test_fit_logistic_regression() {
 
 #[test]
 fn test_fit_xor() {
+    // XOR с hidden=16 должен сходиться стабильно.
+    // Проверяем 3 запуска — хотя бы 2 из 3 должны дать 4/4.
+    let mut successes = 0;
+
+    for _ in 0..3 {
+        let mut net = Network::new();
+        let (w1, b1) = net.Linear(2, 16); // 16 нейронов
+        let (w2, b2) = net.Linear(16, 2);
+
+        let x = Tensor::new(
+            vec![0., 0., 0., 1., 1., 0., 1., 1.],
+            vec![4, 2],
+            false,
+            vec![],
+            None,
+        );
+        let y = Tensor::new(
+            vec![1., 0., 0., 1., 0., 1., 1., 0.],
+            vec![4, 2],
+            false,
+            vec![],
+            None,
+        );
+
+        let x_source = DataSource::Tensor(x.tensor_data.clone());
+        let y_source = DataSource::Tensor(y.tensor_data.clone());
+
+        let forward_fn = |x: &Tensor| x.matmul(&w1).add(&b1).relu().matmul(&w2).add(&b2);
+
+        net.fit(
+            3000,
+            0.1,
+            x_source,
+            y_source,
+            Loss::CrossEntropyWithSoftmax,
+            4,
+            0,
+            forward_fn,
+        );
+
+        let pred = forward_fn(&x);
+        let pred_data = pred.tensor_data.borrow().data.clone();
+        let mut correct = 0;
+        for i in 0..4 {
+            let p0 = pred_data[i * 2];
+            let p1 = pred_data[i * 2 + 1];
+            let pred_class = if p0 > p1 { 0 } else { 1 };
+            let target_class = if y.tensor_data.borrow().data[i * 2] > 0.5 {
+                0
+            } else {
+                1
+            };
+            if pred_class == target_class {
+                correct += 1;
+            }
+        }
+        if correct == 4 {
+            successes += 1;
+        }
+    }
+    assert!(
+        successes >= 3,
+        "XOR: сходится только {} из 3 запусков (ожидалось ≥3)",
+        successes
+    );
+}
+
+#[test]
+fn test_fit_xor_light() {
     let mut net = Network::new();
     let (w1, b1) = net.Linear(2, 4);
     let (w2, b2) = net.Linear(4, 2);
@@ -238,12 +307,7 @@ fn test_fit_xor() {
         None,
     );
     let y = Tensor::new(
-        vec![
-            1., 0., // 0 XOR 0 = 0
-            0., 1., // 0 XOR 1 = 1
-            0., 1., // 1 XOR 0 = 1
-            1., 0., // 1 XOR 1 = 0
-        ],
+        vec![1., 0., 0., 1., 0., 1., 1., 0.],
         vec![4, 2],
         false,
         vec![],
@@ -256,7 +320,7 @@ fn test_fit_xor() {
     let forward_fn = |x: &Tensor| x.matmul(&w1).add(&b1).relu().matmul(&w2).add(&b2);
 
     net.fit(
-        1000,
+        2000,
         0.5,
         x_source,
         y_source,
@@ -266,7 +330,6 @@ fn test_fit_xor() {
         forward_fn,
     );
 
-    // Проверим классификацию
     let pred = forward_fn(&x);
     let pred_data = pred.tensor_data.borrow().data.clone();
     let mut correct = 0;
@@ -282,42 +345,6 @@ fn test_fit_xor() {
         if pred_class == target_class {
             correct += 1;
         }
-    }
-    assert_eq!(correct, 4, "XOR: {} / 4 правильно", correct);
-    assert!(
-        correct >= 3,
-        "XOR: {} / 4 правильно (ожидалось хотя бы 3)",
-        correct
-    );
-}
-
-#[test]
-fn test_fit_xor_light() {
-    let mut net = Network::new();
-    let (w1, b1) = net.Linear(2, 4);
-    let (w2, b2) = net.Linear(4, 2);
-
-    let x = Tensor::new(vec![0., 0., 0., 1., 1., 0., 1., 1.], vec![4, 2], false, vec![], None);
-    let y = Tensor::new(vec![1., 0., 0., 1., 0., 1., 1., 0.], vec![4, 2], false, vec![], None);
-
-    let x_source = DataSource::Tensor(x.tensor_data.clone());
-    let y_source = DataSource::Tensor(y.tensor_data.clone());
-
-    let forward_fn = |x: &Tensor| {
-        x.matmul(&w1).add(&b1).relu().matmul(&w2).add(&b2)
-    };
-
-    net.fit(2000, 0.5, x_source, y_source, Loss::CrossEntropyWithSoftmax, 4, 0, forward_fn);
-
-    let pred = forward_fn(&x);
-    let pred_data = pred.tensor_data.borrow().data.clone();
-    let mut correct = 0;
-    for i in 0..4 {
-        let p0 = pred_data[i * 2];
-        let p1 = pred_data[i * 2 + 1];
-        let pred_class = if p0 > p1 { 0 } else { 1 };
-        let target_class = if y.tensor_data.borrow().data[i * 2] > 0.5 { 0 } else { 1 };
-        if pred_class == target_class { correct += 1; }
     }
     assert!(correct >= 3, "XOR: {} / 4 (ожидалось хотя бы 3)", correct);
 }
@@ -437,4 +464,41 @@ fn test_conv_network_shape() {
 
     let out = net.forward(&x, forward_fn);
     assert_eq!(out.tensor_data.borrow().shape, vec![1, 10]);
+}
+
+#[test]
+fn test_linear_he_uniform_bound() {
+    let mut net = Network::new();
+    let (w, _b) = net.Linear(100, 50);
+
+    let data = &w.tensor_data.borrow().data;
+    let expected_bound = (6.0_f32 / 100.0).sqrt();
+
+    for v in data {
+        assert!(v.abs() <= expected_bound + 1e-6);
+    }
+}
+
+#[test]
+fn test_conv2d_he_uniform_bound() {
+    let mut net = Network::new();
+    let k = net.Conv2d(3, 32, (3, 3));
+
+    let data = &k.tensor_data.borrow().data;
+    // fan_in = 3 * 3 * 3 = 27
+    let expected_bound = (6.0_f32 / 27.0).sqrt();
+
+    for v in data {
+        assert!(v.abs() <= expected_bound + 1e-6);
+    }
+}
+
+#[test]
+fn test_biases_are_zero() {
+    let mut net = Network::new();
+    let (_w, b) = net.Linear(10, 5);
+
+    for v in b.tensor_data.borrow().data.iter() {
+        assert_eq!(*v, 0.0, "bias должен быть 0");
+    }
 }

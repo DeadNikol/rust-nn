@@ -197,35 +197,6 @@ impl TensorData {
             });
 
             new_data
-
-            // Случай 2: различается batch → broadcasting
-
-            // let batch_self = self.shape[0];
-            // let batch_right = right_tensor.shape[0];
-            // let elements_per_batch: usize = self.shape[1..].iter().product();
-
-            // let output_batch = batch_self.max(batch_right);
-            // let mut new_data = vec![0.0; output_batch * elements_per_batch];
-
-            // new_data
-            //     .par_chunks_mut(elements_per_batch)
-            //     .enumerate()
-            //     .for_each(|(batch, chunk)| {
-            //         for i in 0..elements_per_batch {
-            //             let a_val = if batch_self == 1 {
-            //                 temp_data[i]
-            //             } else {
-            //                 temp_data[batch * elements_per_batch + i]
-            //             };
-            //             let b_val = if batch_right == 1 {
-            //                 temp_right_data[i]
-            //             } else {
-            //                 temp_right_data[batch * elements_per_batch + i]
-            //             };
-            //             chunk[i] = a_val + b_val;
-            //         }
-            //     });
-            // new_data
         }
     }
     /// Функция активации ReLu
@@ -525,6 +496,16 @@ impl Tensor {
         let mut rng = rand::rng();
         let data: Vec<f32> = (0..len).map(|_| rng.random_range(low..high)).collect();
         return Self::new(data, shape, require_grad, Vec::new(), None);
+    }
+
+    pub fn he_uniform(shape: Vec<usize>, require_grad: bool) -> Tensor {
+        let fan_in = match shape.len() {
+            2 => shape[0],
+            4 => shape[1..].iter().product(),
+            _ => panic!("he_uniform поддерживает только 2D (Linear) и 4D (Conv2d), получено {}D", shape.len()),
+        };
+        let bound = (6.0 / fan_in as f32).sqrt();
+        Tensor::uniform(-bound, bound, shape, require_grad)
     }
 
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, String> {

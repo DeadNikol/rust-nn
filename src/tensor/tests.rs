@@ -914,3 +914,59 @@ fn test_cross_entropy_stability() {
     assert!((v - 1.386).abs() < 1e-3, "нестабильный softmax: {}", v);
     assert!(v.is_finite(), "loss = {} (NaN/inf)", v);
 }
+
+// ==================== HE-UNIFORM ====================
+
+#[test]
+fn test_he_uniform_bound_linear() {
+    // Linear [100, 50]: fan_in = 100, bound = sqrt(6/100) ≈ 0.2449
+    let t = Tensor::he_uniform(vec![100, 50], false);
+    let data = &t.tensor_data.borrow().data;
+    let expected_bound = (6.0_f32 / 100.0).sqrt();
+
+    for v in data {
+        assert!(
+            v.abs() <= expected_bound + 1e-6,
+            "v = {} вне [-{}, {}]",
+            v,
+            expected_bound,
+            expected_bound
+        );
+    }
+}
+
+#[test]
+fn test_he_uniform_bound_conv() {
+    // Conv [32, 3, 3, 3]: fan_in = 3*3*3 = 27, bound = sqrt(6/27) ≈ 0.4714
+    let t = Tensor::he_uniform(vec![32, 3, 3, 3], false);
+    let data = &t.tensor_data.borrow().data;
+    let expected_bound = (6.0_f32 / 27.0).sqrt();
+
+    for v in data {
+        assert!(v.abs() <= expected_bound + 1e-6);
+    }
+}
+
+#[test]
+fn test_he_uniform_variance() {
+    // Для большого тензора var ≈ bound² / 3 = 2 / fan_in
+    let t = Tensor::he_uniform(vec![1000, 100], false);
+    let data = &t.tensor_data.borrow().data;
+
+    let mean: f32 = data.iter().sum::<f32>() / data.len() as f32;
+    let var: f32 = data.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / data.len() as f32;
+
+    // Var ≈ 2 / fan_in = 2 / 1000 = 0.002
+    assert!(
+        (var - 0.002).abs() < 0.0005,
+        "var = {} (ожидалось 0.002)",
+        var
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_he_uniform_wrong_ndim() {
+    // 3D не поддерживается
+    Tensor::he_uniform(vec![2, 3, 4], false);
+}

@@ -1,7 +1,7 @@
-use nn_lib::tensor::tensor::Tensor;
-use nn_lib::network::network::Loss;
 use nn_lib::batch_iterator::batch_iterator::DataSource;
+use nn_lib::network::network::Loss;
 use nn_lib::network::network::Network;
+use nn_lib::tensor::tensor::Tensor;
 use rayon::prelude::*;
 use std::fs;
 
@@ -307,7 +307,7 @@ fn load_mnist_subset(subset_size: usize) -> (DataSource, DataSource) {
 }
 
 fn train_mnist() {
-    let (x_source, y_source) = load_mnist_subset(10_000);
+    let (x_source, y_source) = load_mnist_subset(60_000);
 
     // Создаём сеть
     let mut net = Network::new();
@@ -350,8 +350,8 @@ fn train_mnist() {
     println!("\n=== Обучение на MNIST (10000 картинок) ===");
 
     net.fit(
-        2,   // эпохи
-        0.005, // learning rate
+        10,     // эпохи
+        0.001, // learning rate
         x_source,
         y_source,
         Loss::CrossEntropyWithSoftmax,

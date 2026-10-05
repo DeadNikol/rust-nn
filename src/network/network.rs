@@ -23,8 +23,10 @@ impl Network {
     }
 
     pub fn Linear(&mut self, n_input: usize, n_output: usize) -> (Tensor, Tensor) {
-        let weights = Tensor::uniform(-1., 1., vec![n_input, n_output], true);
-        let biases = Tensor::uniform(-1., 1., vec![1, n_output], true);
+        // let weights = Tensor::uniform(-1., 1., vec![n_input, n_output], true);
+        let weights = Tensor::he_uniform(vec![n_input, n_output], true);
+        // let biases = Tensor::uniform(-1., 1., vec![1, n_output], true);
+        let biases = Tensor::new(vec![0.0; n_output], vec![1, n_output], true, vec![], None); // Синий кит сказал, что так лучше, чем рандомно
         self.parametres.push(weights.tensor_data.clone());
         self.parametres.push(biases.tensor_data.clone());
 
@@ -47,9 +49,13 @@ impl Network {
         n_kernels_c_out: usize,
         kernel_size: (usize, usize),
     ) -> Tensor {
-        let kernels = Tensor::uniform(
-            -1.,
-            1.,
+        // let kernels = Tensor::uniform(
+        //     -1.,
+        //     1.,
+        //     vec![n_kernels_c_out, n_layers_c_in, kernel_size.0, kernel_size.1],
+        //     true,
+        // );
+        let kernels = Tensor::he_uniform(
             vec![n_kernels_c_out, n_layers_c_in, kernel_size.0, kernel_size.1],
             true,
         );
