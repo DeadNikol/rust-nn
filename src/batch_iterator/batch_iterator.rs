@@ -1,67 +1,9 @@
 //! pipasosia
 
-use crate::tensor::tensor::{Tensor, TensorData};
+use crate::tensor::tensor::Tensor;
 use rand::rng;
 use rand::seq::SliceRandom;
-use std::cell::RefCell;
-use std::rc::Rc;
-
-#[derive(Clone)]
-pub enum DataSource {
-    Tensor(Rc<RefCell<TensorData>>), // готовые данные
-    Images(Vec<String>),             // пути к картинкам
-}
-
-impl DataSource {
-    pub fn len(&self) -> usize {
-        match self {
-            DataSource::Tensor(t) => t.borrow().shape[0],
-            DataSource::Images(paths) => paths.len(),
-        }
-    }
-
-    pub fn sample_size(&self) -> usize {
-        match self {
-            DataSource::Tensor(t) => t.borrow().shape[1..].iter().product(),
-            DataSource::Images(paths) => {
-                if paths.is_empty() {
-                    return 0;
-                }
-
-                let img = Tensor::from_path(&paths[0]).unwrap();
-                img.tensor_data.borrow().shape[1..].iter().product()
-            }
-        }
-    }
-
-    pub fn sample_shape(&self) -> Vec<usize> {
-        match self {
-            DataSource::Tensor(t) => t.borrow().shape[1..].to_vec(),
-            DataSource::Images(paths) => {
-                if paths.is_empty() {
-                    return vec![];
-                }
-                let img = Tensor::from_path(&paths[0]).unwrap();
-                img.tensor_data.borrow().shape.clone()
-            }
-        }
-    }
-
-    pub fn get_sample(&self, idx: usize) -> Vec<f32> {
-        match self {
-            DataSource::Tensor(t) => {
-                let data = t.borrow();
-                let sample_size: usize = data.shape[1..].iter().product();
-                let start = idx * sample_size;
-                data.data[start..start + sample_size].to_vec()
-            }
-            DataSource::Images(paths) => {
-                let img = Tensor::from_path(&paths[idx]).unwrap();
-                img.tensor_data.borrow().data.clone()
-            }
-        }
-    }
-}
+use super::data_source::DataSource;
 
 pub struct BatchIterator {
     pub(crate) x_source: DataSource,

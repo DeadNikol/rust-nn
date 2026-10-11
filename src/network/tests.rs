@@ -1,6 +1,6 @@
 use super::network::{Loss, Network};
 use crate::{
-    batch_iterator::batch_iterator::DataSource, network::network::accuracy, tensor::tensor::Tensor,
+    batch_iterator::data_source::DataSource, network::network::accuracy, tensor::tensor::Tensor,
 };
 use std::rc::Rc;
 
@@ -501,4 +501,45 @@ fn test_biases_are_zero() {
     for v in b.tensor_data.borrow().data.iter() {
         assert_eq!(*v, 0.0, "bias должен быть 0");
     }
+}
+
+#[test]
+fn test_network_smoke_with_folders() {
+    // ===== 1. Собираем датасет =====
+    let (x_source, labels) = DataSource::from_folders_with_classes(vec![
+        ("C:/Папка для всего/Папка для VS Code/rust/NN/src/batch_iterator/images".to_string(), 0),
+        ("C:/Папка для всего/Папка для VS Code/rust/NN/src/batch_iterator/images".to_string(), 1),
+    ]);
+
+    // 20 картинок, метки [0;10, 1;10]
+    assert_eq!(x_source.len(), 20);
+    assert_eq!(labels.len(), 20);
+
+    let y_source = DataSource::one_hot(&labels, 2);
+
+    // ===== 2. Создаём маленькую сеть =====
+    let mut net = Network::new();
+    let (w1, b1) = net.Linear(28 * 28, 16);
+    let (w2, b2) = net.Linear(16, 2);
+
+    let forward_fn = |x: &Tensor| {
+        x.flatten()
+            .matmul(&w1)
+            .add(&b1)
+            .relu()
+            .matmul(&w2)
+            .add(&b2)
+    };
+
+    // ===== 3. Одна эпоха =====
+    net.fit(
+        1,
+        0.001,
+        x_source,
+        y_source,
+        Loss::CrossEntropyWithSoftmax,
+        4,
+        1,
+        forward_fn,
+    );
 }

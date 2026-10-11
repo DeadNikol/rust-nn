@@ -1,9 +1,11 @@
 //! Крейт с структурой Нейронной Сети, содержащей в себе параметры модели
 
 use std::{cell::RefCell, rc::Rc};
+use std::time::Instant;
 
 use crate::{
-    batch_iterator::batch_iterator::{BatchIterator, DataSource},
+    batch_iterator::batch_iterator::BatchIterator,
+    batch_iterator::data_source::DataSource,
     optims::optims::SGD,
     tensor::tensor::{Tensor, TensorData},
 };
@@ -49,12 +51,6 @@ impl Network {
         n_kernels_c_out: usize,
         kernel_size: (usize, usize),
     ) -> Tensor {
-        // let kernels = Tensor::uniform(
-        //     -1.,
-        //     1.,
-        //     vec![n_kernels_c_out, n_layers_c_in, kernel_size.0, kernel_size.1],
-        //     true,
-        // );
         let kernels = Tensor::he_uniform(
             vec![n_kernels_c_out, n_layers_c_in, kernel_size.0, kernel_size.1],
             true,
@@ -90,45 +86,120 @@ impl Network {
 
         let mut batch_iterator = BatchIterator::new(data.clone(), targets.clone(), batch_size);
 
+        // Это код без таймеров.
+        // for epoch in 0..epochs {
+        //     // let mut index = 0;
+        //     // println!("epoch: {},", epoch); // batch: ", epoch);
+
+        //     let mut temp_losses_during_one_epoch: Vec<f32> = vec![];
+        //     let mut temp_accuracy_during_one_epoch: Vec<f32> = vec![];
+
+        //     for (x, y) in batch_iterator.by_ref() {
+        //         // print!(" {}", index);
+        //         // index += 1;
+        //         let pred = self.forward(&x, &forward_fn);
+        //         let batch_loss = match loss_function {
+        //             Loss::MSE => pred.mse(&y),
+        //             Loss::CrossEntropyWithSoftmax => pred.cross_entropy_with_softmax(&y),
+        //         };
+        //         batch_loss.backward();
+        //         optimizer.backward_step();
+
+        //         temp_losses_during_one_epoch.push(batch_loss.tensor_data.borrow().data[0].clone());
+
+        //         let acc = accuracy(&pred, &y);
+        //         temp_accuracy_during_one_epoch.push(acc);
+        //     }
+        //     // print!("\n");
+
+        //     batch_iterator.reset_indices();
+
+        //     let total: f32 = temp_losses_during_one_epoch.iter().sum();
+        //     let epoch_loss = total / temp_losses_during_one_epoch.len() as f32;
+        //     losses.push(epoch_loss);
+        //     if verbose != 0 && epoch % verbose == 0 {
+        //         println!("epoch {}: loss - {}", epoch, epoch_loss);
+        //     }
+
+        //     let total: f32 = temp_accuracy_during_one_epoch.iter().sum();
+        //     let epoch_acc = total / temp_accuracy_during_one_epoch.len() as f32;
+        //     if verbose != 0 && epoch % verbose == 0 {
+        //         println!("epoch {}: accuracy - {}", epoch, epoch_acc);
+        //     }
+        // }
+
         for epoch in 0..epochs {
-            // let mut index = 0;
-            // println!("epoch: {},", epoch); // batch: ", epoch);
+            let epoch_start = Instant::now();
 
             let mut temp_losses_during_one_epoch: Vec<f32> = vec![];
             let mut temp_accuracy_during_one_epoch: Vec<f32> = vec![];
 
-            for (x, y) in batch_iterator.by_ref() {
-                // print!(" {}", index);
-                // index += 1;
+            for (batch_idx, (x, y)) in batch_iterator.by_ref().enumerate() {
+                let batch_start = Instant::now();
+
+                // ===== FORWARD =====
+                let t = Instant::now();
                 let pred = self.forward(&x, &forward_fn);
+                let t_forward = t.elapsed();
+
+                // ===== LOSS =====
+                let t = Instant::now();
                 let batch_loss = match loss_function {
                     Loss::MSE => pred.mse(&y),
                     Loss::CrossEntropyWithSoftmax => pred.cross_entropy_with_softmax(&y),
                 };
+                let t_loss = t.elapsed();
+
+                // ===== BACKWARD =====
+                let t = Instant::now();
                 batch_loss.backward();
+                let t_backward = t.elapsed();
+
+                // ===== OPTIMIZER =====
+                let t = Instant::now();
                 optimizer.backward_step();
+                let t_opt = t.elapsed();
 
-                temp_losses_during_one_epoch.push(batch_loss.tensor_data.borrow().data[0].clone());
-
+                // ===== ACCURACY =====
+                let t = Instant::now();
                 let acc = accuracy(&pred, &y);
+                let t_acc = t.elapsed();
+
+                temp_losses_during_one_epoch.push(batch_loss.tensor_data.borrow().data[0]);
                 temp_accuracy_during_one_epoch.push(acc);
+
+                // ===== ПЕЧАТЬ =====
+                if batch_idx % 20 == 0 {
+                    println!(
+                        "[batch {}] fwd={:?} loss={:?} bwd={:?} opt={:?} acc={:?} | total={:?}",
+                        batch_idx,
+                        t_forward,
+                        t_loss,
+                        t_backward,
+                        t_opt,
+                        t_acc,
+                        batch_start.elapsed()
+                    );
+                }
+                // break;
             }
-            // print!("\n");
 
             batch_iterator.reset_indices();
 
             let total: f32 = temp_losses_during_one_epoch.iter().sum();
             let epoch_loss = total / temp_losses_during_one_epoch.len() as f32;
             losses.push(epoch_loss);
-            if verbose != 0 && epoch % verbose == 0 {
-                println!("epoch {}: loss - {}", epoch, epoch_loss);
-            }
 
             let total: f32 = temp_accuracy_during_one_epoch.iter().sum();
             let epoch_acc = total / temp_accuracy_during_one_epoch.len() as f32;
-            if verbose != 0 && epoch % verbose == 0 {
-                println!("epoch {}: accuracy - {}", epoch, epoch_acc);
-            }
+
+            println!(
+                "epoch {}: loss = {:.4}, acc = {:.4}, time = {:?}",
+                epoch,
+                epoch_loss,
+                epoch_acc,
+                epoch_start.elapsed()
+            );
         }
         plot_losses(&losses, "loss_plot.png").unwrap();
     }
