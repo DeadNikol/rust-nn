@@ -181,7 +181,7 @@ impl Network {
                         batch_start.elapsed()
                     );
                 }
-                // break;
+                break;
             }
 
             batch_iterator.reset_indices();

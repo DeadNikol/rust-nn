@@ -196,7 +196,7 @@ fn train_mnist_new() {
             ($label:expr, $body:expr) => {{
                 let t = Instant::now();
                 let result = $body;
-                // println!("  [fwd] {:>12}: {:>10.3?}", $label, t.elapsed());
+                println!("  [fwd] {:>12}: {:>10.3?}", $label, t.elapsed());
                 result
             }};
         }
@@ -232,7 +232,7 @@ fn train_mnist_new() {
     println!("=== Обучение на MNIST ===");
 
     net.fit(
-        3,    // эпохи
+        1,    // эпохи
         0.001, // lr
         x_source,
         y_source,

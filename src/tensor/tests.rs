@@ -970,3 +970,93 @@ fn test_he_uniform_wrong_ndim() {
     // 3D не поддерживается
     Tensor::he_uniform(vec![2, 3, 4], false);
 }
+
+#[test]
+fn test_clone_creates_new_rc_parents() {
+    // ===== 1. Создаём два тензора =====
+    let a = Tensor::new(vec![1., 2., 3., 4., 5., 6.], vec![2, 3], true, vec![], None);
+    let b = Tensor::new(
+        vec![7., 8., 9., 10., 11., 12.],
+        vec![3, 2],
+        true,
+        vec![],
+        None,
+    );
+
+    // ===== 2. Перемножаем — получаем c = a @ b =====
+    let c = a.matmul(&b);
+
+    // ===== 3. Проверяем, что у c два родителя =====
+    assert_eq!(
+        c.tensor_data.borrow().parents.len(),
+        2,
+        "у результата matmul должно быть 2 родителя"
+    );
+
+    // ===== 4. Клонируем c =====
+    let c_clone = c.self_clone();
+
+    // ===== 5. Проверяем, что c_clone — независимый Rc =====
+    //    (не тот же самый TensorData, что у c)
+    assert!(
+        !Rc::ptr_eq(&c.tensor_data, &c_clone.tensor_data),
+        "c_clone должен иметь свой собственный Rc, а не алиас c"
+    );
+
+    // ===== 6. Главная проверка: родители клона — разные Rc с родителями оригинала =====
+    {
+        let c_parents = &c.tensor_data.borrow().parents;
+        let c_clone_parents = &c_clone.tensor_data.borrow().parents;
+
+        // Длины совпадают
+        assert_eq!(
+            c_parents.len(),
+            c_clone_parents.len(),
+            "у клона столько же родителей, сколько у оригинала"
+        );
+        assert_eq!(c_parents.len(), 2);
+
+        // Для каждого родителя: Rc разные
+        for i in 0..c_parents.len() {
+            assert!(
+                !Rc::ptr_eq(&c_parents[i], &c_clone_parents[i]),
+                "родитель [{}] клона — тот же Rc, что родитель оригинала. \
+                 Клон должен создавать НОВЫЕ Rc, а не алиасы",
+                i
+            );
+        }
+    }
+
+    // ===== 7. Проверяем, что данные копии, а не алиасы =====
+    {
+        let data_c = c.tensor_data.borrow().data.clone();
+        let data_c_clone = c_clone.tensor_data.borrow().data.clone();
+
+        // Значения совпадают
+        assert_eq!(
+            data_c, data_c_clone,
+            "данные клона должны совпадать с оригиналом"
+        );
+
+        // Но это разные Vec (mut через один не виден в другом)
+        c.tensor_data.borrow_mut().data[0] = 999.0;
+        assert_ne!(
+            c.tensor_data.borrow().data[0],
+            c_clone.tensor_data.borrow().data[0],
+            "изменение data в оригинале не должно влиять на клон"
+        );
+    }
+
+    // ===== 8. Проверяем, что shape независим =====
+    {
+        let shape_c = c.tensor_data.borrow().shape.clone();
+        let shape_c_clone = c_clone.tensor_data.borrow().shape.clone();
+        assert_eq!(shape_c, shape_c_clone);
+    }
+
+    // ===== 9. Проверяем, что require_grad сохранился =====
+    assert!(
+        c_clone.tensor_data.borrow().require_grad,
+        "require_grad должен сохраниться при клонировании"
+    );
+}

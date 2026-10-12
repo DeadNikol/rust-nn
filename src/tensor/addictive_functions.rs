@@ -180,7 +180,7 @@ pub fn op_name(op: &Option<Operation>) -> &'static str {
         Some(Operation::Sigmoid) => "Sigmoid",
         Some(Operation::Tanh) => "Tanh",
         Some(Operation::CrossEntropyWithSoftmax) => "CrossEntropyWithSoftmax",
-        Some(Operation::Conv2d(..)) => "Conv2d",
+        Some(Operation::Conv2d{..}) => "Conv2d",
         Some(Operation::Padding(..)) => "Padding",
         Some(Operation::Reshape) => "Reshape",
         Some(Operation::MaxPool(..)) => "MaxPool",
